@@ -1,5 +1,5 @@
 services:
-  openclaw-gateway:
+  kivan-claw-openclaw-gateway:
     image: ${OPENCLAW_IMAGE}
     build: .
     restart: unless-stopped
@@ -56,7 +56,7 @@ services:
       retries: 5
       start_period: 20s
 
-  openclaw-cli:
+  kivan-claw-openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
     cap_drop:
       - NET_RAW
@@ -81,7 +81,7 @@ services:
     init: true
     entrypoint: ["node", "dist/index.js"]
     depends_on:
-      - openclaw-gateway
+      - kivan-claw-openclaw-gateway
     networks:
       - claw2
 
