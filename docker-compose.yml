@@ -56,7 +56,6 @@ services:
 
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
-    network_mode: "service:openclaw-gateway"
     cap_drop:
       - NET_RAW
       - NET_ADMIN
