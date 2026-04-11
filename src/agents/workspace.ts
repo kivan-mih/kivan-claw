@@ -58,9 +58,23 @@ async function readWorkspaceFileWithGuards(params: {
   filePath: string;
   workspaceDir: string;
 }): Promise<WorkspaceGuardedReadResult> {
+    // If the bootstrap file is a symlink, resolve it and widen boundary
+    // to allow cross-workspace symlinks (e.g., b2/AGENTS.md -> ../b1/AGENTS.md)
+    let absolutePath = params.filePath;
+    let rootPath = params.workspaceDir;
+    try {
+        const stat = await fs.lstat(params.filePath);
+        if (stat.isSymbolicLink()) {
+            absolutePath = await fs.realpath(params.filePath);
+            rootPath = path.dirname(params.workspaceDir);
+        }
+    } catch {
+        // File doesn't exist — proceed with original path, openBoundaryFile handles missing
+    }
+
   const opened = await openBoundaryFile({
-    absolutePath: params.filePath,
-    rootPath: params.workspaceDir,
+    absolutePath: absolutePath,
+    rootPath: rootPath,
     boundaryLabel: "workspace root",
     maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
   });

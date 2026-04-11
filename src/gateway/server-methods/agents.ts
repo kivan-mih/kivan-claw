@@ -32,7 +32,7 @@ import type { IdentityConfig } from "../../config/types.base.js";
 import { sameFileIdentity } from "../../infra/file-identity.js";
 import { SafeOpenError, readLocalFileSafely, writeFileWithinRoot } from "../../infra/fs-safe.js";
 import { assertNoPathAliasEscape } from "../../infra/path-alias-guards.js";
-import { isNotFoundPathError } from "../../infra/path-guards.js";
+import { isNotFoundPathError,isPathInside } from "../../infra/path-guards.js";
 import { movePathToTrash } from "../../plugin-sdk/browser-maintenance.js";
 import { DEFAULT_AGENT_ID, normalizeAgentId } from "../../routing/session-key.js";
 import { resolveUserPath } from "../../utils.js";
@@ -208,6 +208,7 @@ async function resolveAgentWorkspaceFilePath(params: {
       absolutePath: candidatePath,
       rootPath: workspaceReal,
       boundaryLabel: "workspace root",
+      policy: { allowFinalSymlinkForUnlink: true },
     });
   } catch (error) {
     return {
@@ -244,6 +245,12 @@ async function resolveAgentWorkspaceFilePath(params: {
         ...notFoundContext,
         ioPath: candidatePath,
       });
+    }
+    // Allow symlinks to sibling workspaces (inside parent dir) but block
+    // symlinks that escape the workspace parent entirely (e.g. /etc/passwd).
+    const workspaceParent = path.dirname(workspaceReal);
+    if (!isPathInside(workspaceParent, targetReal)) {
+      return { kind: "invalid", requestPath, reason: "symlink target escapes workspace parent" };
     }
     let targetStat: Awaited<ReturnType<typeof fs.stat>>;
     try {
