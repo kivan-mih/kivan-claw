@@ -39,6 +39,21 @@ RUN mkdir -p /out && \
       fi; \
     done
 
+# Install Go (for MOT pipeline)
+RUN curl -sL -o /tmp/go.tar.gz https://go.dev/dl/go1.23.6.linux-amd64.tar.gz \
+ && echo "9379441ea310de000f33a4dc767bd966e72ab2826270e038e78b2c53c2e7802d  /tmp/go.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/go.tar.gz -C /usr/local \
+ && rm -f /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:$PATH"
+
+# Install JDK 21 (Eclipse Temurin)
+RUN curl -sL -o /tmp/jdk21.tar.gz https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.6%2B7/OpenJDK21U-jdk_x64_linux_hotspot_21.0.6_7.tar.gz \
+ && echo "a2650fba422283fbed20d936ce5d2a52906a5414ec17b2f7676dddb87201dbae  /tmp/jdk21.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/jdk21.tar.gz -C /usr/local \
+ && rm -f /tmp/jdk21.tar.gz
+ENV JAVA_HOME="/usr/local/jdk-21.0.6+7"
+ENV PATH="$JAVA_HOME/bin:$PATH"
+
 # ── Stage 2: Build ──────────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
