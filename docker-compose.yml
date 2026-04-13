@@ -41,8 +41,8 @@ services:
         "--port",
         "18789",
       ]
-#    healthcheck:
-#      disable: true
+    healthcheck:
+      disable: true
 #      test:
 #        [
 #          "CMD",
