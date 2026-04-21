@@ -91,4 +91,6 @@ services:
 
 networks:
   shared:
-    internal: true
+    name: shared
+    external: true
+
