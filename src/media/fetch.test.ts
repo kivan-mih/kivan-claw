@@ -5,6 +5,7 @@ const fetchWithSsrFGuardMock = vi.hoisted(() => vi.fn());
 vi.mock("../infra/net/fetch-guard.js", () => ({
   fetchWithSsrFGuard: (...args: unknown[]) => fetchWithSsrFGuardMock(...args),
   withStrictGuardedFetchMode: <T>(params: T) => params,
+  withTrustedEnvProxyGuardedFetchMode: <T>(params: T) => params,
 }));
 
 type FetchRemoteMedia = typeof import("./fetch.js").fetchRemoteMedia;

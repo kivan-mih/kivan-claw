@@ -1,6 +1,12 @@
 import path from "node:path";
 import { formatErrorMessage } from "../infra/errors.js";
-import { fetchWithSsrFGuard, withStrictGuardedFetchMode } from "../infra/net/fetch-guard.js";
+import {
+      fetchWithSsrFGuard,
+      withStrictGuardedFetchMode,
+      withTrustedEnvProxyGuardedFetchMode,
+    } from "../infra/net/fetch-guard.js";
+import { hasProxyEnvConfigured } from "../infra/net/proxy-env.js";
+
 import type { LookupFn, PinnedDispatcherPolicy, SsrFPolicy } from "../infra/net/ssrf.js";
 import { redactSensitiveText } from "../logging/redact.js";
 import { detectMime, extensionForMime } from "./mime.js";
@@ -116,9 +122,13 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
     dispatcherAttempts && dispatcherAttempts.length > 0
       ? dispatcherAttempts
       : [{ dispatcherPolicy: undefined, lookupFn }];
-  const runGuardedFetch = async (attempt: FetchDispatcherAttempt) =>
+  const wrapper = hasProxyEnvConfigured()
+    ? withTrustedEnvProxyGuardedFetchMode
+        : withStrictGuardedFetchMode;
+
+    const runGuardedFetch = async (attempt: FetchDispatcherAttempt) =>
     await fetchWithSsrFGuard(
-      withStrictGuardedFetchMode({
+        wrapper({
         url,
         fetchImpl,
         init: requestInit,
