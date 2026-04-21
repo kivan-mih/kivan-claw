@@ -1,2 +1,2 @@
 [core]
-    sshCommand = ssh -o ProxyCommand="socat - PROXY:proxy-guard:%h:%p,proxyport=3128"
+    sshCommand = ssh -o ProxyCommand='socat - PROXY:proxy-guard:%h:%p,proxyport=3128'
