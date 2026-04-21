@@ -1,4 +1,3 @@
-import { bootstrap } from "global-agent";
 import { EnvHttpProxyAgent } from "undici";
 
 declare global {
@@ -9,9 +8,6 @@ declare global {
 
 if (!globalThis.__proxyFixInstalled__) {
   globalThis.__proxyFixInstalled__ = true;
-
-  // Legacy node:http / node:https clients
-  bootstrap();
 
   const httpProxy = process.env.HTTP_PROXY ?? process.env.http_proxy;
   const httpsProxy = process.env.HTTPS_PROXY ?? process.env.https_proxy;
