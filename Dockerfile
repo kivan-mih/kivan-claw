@@ -54,7 +54,6 @@ RUN curl -sL -o /tmp/jdk21.tar.gz https://github.com/adoptium/temurin21-binaries
 ENV JAVA_HOME="/usr/local/jdk-21.0.6+7"
 ENV PATH="$JAVA_HOME/bin:$PATH"
 
-
 # ── Stage 2: Build ──────────────────────────────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR

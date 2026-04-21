@@ -1366,6 +1366,7 @@
     "express": "^5.2.1",
     "file-type": "22.0.1",
     "gaxios": "7.1.4",
+    "global-agent": "^3.0.0",
     "google-auth-library": "^10.6.2",
     "grammy": "^1.42.0",
     "hono": "4.12.12",
