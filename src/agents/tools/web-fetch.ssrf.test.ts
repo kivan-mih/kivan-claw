@@ -156,6 +156,36 @@ describe("web_fetch SSRF protection", () => {
     });
   });
 
+  it("routes through env proxy (skipping pinned DNS) when HTTPS_PROXY is set", async () => {
+    const prior = {
+      HTTPS_PROXY: process.env.HTTPS_PROXY,
+      HTTP_PROXY: process.env.HTTP_PROXY,
+    };
+    process.env.HTTPS_PROXY = "http://proxy-guard:3128";
+    delete process.env.HTTP_PROXY;
+    try {
+      const fetchSpy = setMockFetch().mockResolvedValue(textResponse("ok"));
+      const tool = await createWebFetchToolForTest();
+
+      const result = await tool?.execute?.("call", { url: "https://example.com" });
+      expect(result?.details).toMatchObject({ status: 200, extractor: "raw" });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      // TRUSTED_ENV_PROXY path bypasses the pinned-DNS resolve, so lookupFn is untouched.
+      expect(lookupMock).not.toHaveBeenCalled();
+    } finally {
+      if (prior.HTTPS_PROXY === undefined) {
+        delete process.env.HTTPS_PROXY;
+      } else {
+        process.env.HTTPS_PROXY = prior.HTTPS_PROXY;
+      }
+      if (prior.HTTP_PROXY === undefined) {
+        delete process.env.HTTP_PROXY;
+      } else {
+        process.env.HTTP_PROXY = prior.HTTP_PROXY;
+      }
+    }
+  });
+
   it("allows RFC2544 benchmark-range URLs only when web_fetch ssrfPolicy opts in", async () => {
     const url = "http://198.18.0.153/file";
     lookupMock.mockResolvedValue([{ address: "198.18.0.153", family: 4 }]);
