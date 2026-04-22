@@ -91,14 +91,25 @@ export async function assertBrowserNavigationAllowed(
     );
   }
 
-  // Browser network stacks may apply env proxy routing at connect-time, which
-  // can bypass strict destination-binding intent from pre-navigation DNS checks.
-  // In strict mode, fail closed unless private-network navigation is explicitly
-  // enabled by policy.
-  if (hasProxyEnvConfigured() && !isPrivateNetworkAllowedByPolicy(opts.ssrfPolicy)) {
-    throw new InvalidBrowserNavigationUrlError(
-      "Navigation blocked: strict browser SSRF policy cannot be enforced while env proxy variables are set",
-    );
+  if (hasProxyEnvConfigured()) {
+    // Trust the env proxy to enforce egress policy. Node-side pinned DNS cannot
+    // be enforced across Chromium's network stack, and direct DNS may not work
+    // at all on proxy-only hosts. Hostname allowlist still applies.
+    const hasHostnameAllowlist =
+      (opts.ssrfPolicy?.allowedHostnames?.length ?? 0) > 0 ||
+      (opts.ssrfPolicy?.hostnameAllowlist?.length ?? 0) > 0;
+    if (
+      opts.ssrfPolicy &&
+      !isPrivateNetworkAllowedByPolicy(opts.ssrfPolicy) &&
+      !isIpLiteralHostname(parsed.hostname) &&
+      hasHostnameAllowlist &&
+      !isExplicitlyAllowedBrowserHostname(parsed.hostname, opts.ssrfPolicy)
+    ) {
+      throw new InvalidBrowserNavigationUrlError(
+        "Navigation blocked: hostname not in configured allowlist",
+      );
+    }
+    return;
   }
 
   // Browser navigations happen in Chromium's network stack, not Node's. In
