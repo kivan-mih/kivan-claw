@@ -1,6 +1,11 @@
 services:
-  openclaw-gateway:
-    image: ${OPENCLAW_IMAGE:-openclaw:local}
+  kivan-claw-openclaw-gateway:
+    image: ${OPENCLAW_IMAGE}
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    init: true
     environment:
       HOME: /home/node
       TERM: xterm-256color
@@ -9,10 +14,17 @@ services:
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      NO_PROXY: ${NO_PROXY:-}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - /home/kivan/.ssh:/home/node/.ssh:ro
+      - ./.gitconfig:/home/node/.gitconfig:ro
       ## Uncomment the lines below to enable sandbox isolation
       ## (agents.defaults.sandbox). Requires Docker CLI in the image
       ## (build with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1) or use
@@ -21,14 +33,17 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock
     # group_add:
     #   - "${DOCKER_GID:-999}"
+    networks:
+      - claw2
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
-    init: true
-    restart: unless-stopped
+      - "127.0.0.1:9990-9999:9990-9999"
+      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
+      - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     command:
       [
         "node",
+        "--import",
+        "./proxy_fix.ts",
         "dist/index.js",
         "gateway",
         "--bind",
@@ -49,9 +64,8 @@ services:
       retries: 5
       start_period: 20s
 
-  openclaw-cli:
+  kivan-claw-openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
-    network_mode: "service:openclaw-gateway"
     cap_drop:
       - NET_RAW
       - NET_ADMIN
@@ -70,9 +84,18 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - ./.gitconfig:/home/node/.gitconfig:ro
     stdin_open: true
     tty: true
     init: true
     entrypoint: ["node", "dist/index.js"]
     depends_on:
-      - openclaw-gateway
+      - kivan-claw-openclaw-gateway
+    networks:
+      - claw2
+
+networks:
+  claw2:
+    name: claw2
+    external: true
+    driver: bridge

@@ -569,6 +569,7 @@ export const registerTelegramNativeCommands = ({
     ...(nativeEnabled ? pluginCatalog.commands : []),
     ...customCommands,
   ];
+  const telegramMenuOnly = new Set(["reset", "restart", "status"]);
   const {
     commandsToRegister,
     totalCommands,
@@ -578,7 +579,7 @@ export const registerTelegramNativeCommands = ({
     descriptionTrimmed,
     textBudgetDropCount,
   } = buildCappedTelegramMenuCommands({
-    allCommands: allCommandsFull,
+      allCommands: allCommandsFull.filter((cmd) => telegramMenuOnly.has(cmd.command)),
   });
   if (overflowCount > 0) {
     runtime.log?.(
