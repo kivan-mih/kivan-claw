@@ -35,10 +35,10 @@ services:
     #   - "${DOCKER_GID:-999}"
     networks:
       - claw2
-    ports:
-      - "127.0.0.1:9990-9999:9990-9999"
-      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
-      - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+    #ports:
+    #  - "127.0.0.1:9990-9999:9990-9999"
+    #  - "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
+    #  - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     command:
       [
         "node",
