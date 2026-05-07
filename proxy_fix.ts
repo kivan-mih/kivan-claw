@@ -1,4 +1,4 @@
-import { EnvHttpProxyAgent } from "undici";
+import { EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
 
 declare global {
   // Prevent double install if imported more than once.
@@ -9,9 +9,13 @@ declare global {
 if (!globalThis.__proxyFixInstalled__) {
   globalThis.__proxyFixInstalled__ = true;
 
-  const httpProxy = process.env.HTTP_PROXY ?? process.env.http_proxy;
-  const httpsProxy = process.env.HTTPS_PROXY ?? process.env.https_proxy;
-  const noProxy = process.env.NO_PROXY ?? process.env.no_proxy;
+  // docker-compose forwards `${HTTP_PROXY:-}` etc., which become "" when unset
+  // on the host. Coerce empty to undefined so EnvHttpProxyAgent falls back to
+  // its own env-var reads instead of treating "" as a configured proxy URL.
+  const pick = (v?: string) => (v && v.length > 0 ? v : undefined);
+  const httpProxy = pick(process.env.HTTP_PROXY ?? process.env.http_proxy);
+  const httpsProxy = pick(process.env.HTTPS_PROXY ?? process.env.https_proxy);
+  const noProxy = pick(process.env.NO_PROXY ?? process.env.no_proxy);
 
   const proxyDispatcher = new EnvHttpProxyAgent({
    httpProxy,
@@ -19,10 +23,11 @@ if (!globalThis.__proxyFixInstalled__) {
    noProxy,
   });
 
-  // Native fetch in modern Node/Undici reads the global dispatcher from this symbol.
-  // Using the symbol directly is the least fragile path across bundled/internal Undici copies.
-  const globalDispatcherSymbol = Symbol.for("undici.globalDispatcher.1");
-  (globalThis as any)[globalDispatcherSymbol] = proxyDispatcher;
+  // Must register via undici's setGlobalDispatcher. Assigning to
+  // globalThis[Symbol.for("undici.globalDispatcher.1")] directly leaves the
+  // dispatcher without Node's fetch interceptor wiring, and every request
+  // fails with `cause: invalid onRequestStart method` before hitting the wire.
+  setGlobalDispatcher(proxyDispatcher);
 
   const originalFetch = globalThis.fetch.bind(globalThis);
 
@@ -68,4 +73,4 @@ if (!globalThis.__proxyFixInstalled__) {
   };
 }
 
-export {};
+
