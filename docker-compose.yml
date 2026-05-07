@@ -66,6 +66,8 @@ services:
 
   kivan-claw-openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
+    env_file:
+      - .env
     cap_drop:
       - NET_RAW
       - NET_ADMIN
@@ -80,6 +82,11 @@ services:
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      NO_PROXY: ${NO_PROXY:-}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
@@ -88,7 +95,7 @@ services:
     stdin_open: true
     tty: true
     init: true
-    entrypoint: ["node", "dist/index.js"]
+    entrypoint: ["node", "--import", "./proxy_fix.ts", "dist/index.js"]
     depends_on:
       - kivan-claw-openclaw-gateway
     networks:
