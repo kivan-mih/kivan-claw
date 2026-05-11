@@ -145,10 +145,8 @@ RUN printf 'packages:\n  - .\n  - ui\n' > /tmp/pnpm-workspace.runtime.yaml && \
     node scripts/check-package-dist-imports.mjs /app
 
 # ── Runtime base image ──────────────────────────────────────────
-FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE} AS base-runtime
-ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST
-LABEL org.opencontainers.image.base.name="docker.io/library/node:24-bookworm-slim" \
-  org.opencontainers.image.base.digest="${OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST}"
+FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS base-runtime
+LABEL org.opencontainers.image.base.name="docker.io/library/node:24-bookworm"
 
 # ── Stage 3: Runtime ────────────────────────────────────────────
 FROM base-runtime
@@ -176,7 +174,7 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
     --mount=type=cache,id=openclaw-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates procps hostname curl git lsof openssl python3 && \
+      ca-certificates procps hostname curl git lsof openssl python3 socat && \
     update-ca-certificates
 
 RUN chown node:node /app
