@@ -240,46 +240,17 @@ export function buildGroupChatContext(params: {
     );
   }
   lines.push(
-    "Be a good group participant: mostly lurk and follow the conversation; reply only when directly addressed or you can add clear value. Emoji reactions are welcome when available.",
-  );
-  lines.push(
     "Write like a human. Avoid Markdown tables. Minimize empty lines and use normal chat conventions, not document-style spacing. Don't type literal \\n sequences; use real line breaks sparingly.",
   );
-  lines.push("If addressed to someone else, stay silent unless invited or correcting key facts.");
   if (normalizeOptionalLowercaseString(params.sessionCtx.Provider) === "discord") {
     lines.push("Discord: wrap bare URLs like <https://example.com> to suppress embeds.");
   }
   lines.push(
     "When subagent or session-spawn tools are available and a directly requested group-chat task will require several tool calls, prefer delegating bounded side investigations early so the channel gets a responsive path forward. Keep the critical path local, avoid subagents for simple one-step work, and only surface concise group-visible updates when they add value.",
   );
-  const canUseSilentReply =
-    !messageToolOnly &&
-    params.silentToken &&
-    (params.silentReplyPolicy !== "disallow" || params.silentReplyRewrite === true);
   if (messageToolOnly) {
     lines.push(
       "If no visible group response is needed, do not call message(action=send). Your normal final answer stays private and will not be posted to the group.",
-    );
-  }
-  if (canUseSilentReply) {
-    if (params.silentReplyPolicy === "allow") {
-      lines.push(
-        `If no response is needed, reply with exactly "${params.silentToken}" (and nothing else) so OpenClaw stays silent.`,
-      );
-      lines.push("Be extremely selective: reply only when directly addressed or clearly helpful.");
-    } else {
-      lines.push(
-        `If no response is needed, reply with exactly "${params.silentToken}" (and nothing else) so OpenClaw can send a short fallback reply.`,
-      );
-    }
-    lines.push(
-      "Do not add any other words, punctuation, tags, markdown/code blocks, or explanations.",
-    );
-    lines.push(
-      `If you only react or otherwise handle the message without a text reply, your final answer must still be exactly "${params.silentToken}". Never say that you are staying quiet, keeping channel noise low, making a context-only note, or sending no channel reply.`,
-    );
-    lines.push(
-      `Any prose describing silence is wrong; the whole final answer must be only "${params.silentToken}".`,
     );
   }
   return lines.join(" ");
