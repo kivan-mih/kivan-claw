@@ -28,10 +28,10 @@ export function resolveSourceReplyDeliveryMode(params: {
   if (chatType === "group" || chatType === "channel") {
     const configuredMode =
       params.cfg.messages?.groupChat?.visibleReplies ?? params.cfg.messages?.visibleReplies;
-    mode = configuredMode === "message_tool" ? "message_tool_only" : "automatic";
+    mode = "automatic";
   } else {
     const configuredMode = params.cfg.messages?.visibleReplies ?? params.defaultVisibleReplies;
-    mode = configuredMode === "message_tool" ? "message_tool_only" : "automatic";
+    mode = "automatic";
   }
   if (mode === "message_tool_only" && params.messageToolAvailable === false) {
     return "automatic";
