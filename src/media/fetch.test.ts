@@ -5,10 +5,7 @@ const fetchWithSsrFGuardMock = vi.hoisted(() => vi.fn());
 vi.mock("../infra/net/fetch-guard.js", () => ({
   fetchWithSsrFGuard: (...args: unknown[]) => fetchWithSsrFGuardMock(...args),
   withStrictGuardedFetchMode: <T>(params: T) => params,
-  withTrustedExplicitProxyGuardedFetchMode: <T>(params: T) => ({
-    ...params,
-    mode: "trusted_explicit_proxy",
-  }),
+  withTrustedEnvProxyGuardedFetchMode: <T>(params: T) => params,
 }));
 
 type FetchModule = typeof import("./fetch.js");
@@ -313,33 +310,4 @@ describe("fetchRemoteMedia", () => {
     await expectBoundedErrorBodyCase(testCase.fetchImpl);
   });
 
-  it("uses trusted explicit-proxy mode when the caller opts in for proxy-side DNS", async () => {
-    const fetchImpl = vi.fn(async () => new Response("ok", { status: 200 }));
-
-    await fetchRemoteMedia({
-      url: "https://files.example.test/file/bot123/photos/test.jpg",
-      fetchImpl,
-      lookupFn: makeLookupFn(),
-      trustExplicitProxyDns: true,
-      dispatcherAttempts: [
-        {
-          dispatcherPolicy: {
-            mode: "explicit-proxy",
-            proxyUrl: "http://localhost:8888",
-            allowPrivateProxy: true,
-          },
-        },
-      ],
-    });
-
-    expect(fetchWithSsrFGuardMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        mode: "trusted_explicit_proxy",
-        dispatcherPolicy: expect.objectContaining({
-          mode: "explicit-proxy",
-          proxyUrl: "http://localhost:8888",
-        }),
-      }),
-    );
-  });
 });

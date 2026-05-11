@@ -142,6 +142,29 @@ function isPathInsideDirectory(rootDir: string, candidatePath: string): boolean 
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+async function resolveWorkspaceFileTarget(
+  workspaceDir: string,
+  name: string,
+): Promise<{ rootDir: string; relativePath: string }> {
+  const candidatePath = path.join(workspaceDir, name);
+  try {
+    const lstat = await fs.lstat(candidatePath);
+    if (lstat.isSymbolicLink()) {
+      const realTarget = await fs.realpath(candidatePath);
+      const workspaceParentReal = await fs.realpath(path.dirname(workspaceDir));
+      if (isPathInsideDirectory(workspaceParentReal, realTarget)) {
+        return {
+          rootDir: workspaceParentReal,
+          relativePath: path.relative(workspaceParentReal, realTarget),
+        };
+      }
+    }
+  } catch {
+    // Missing / unreadable — fall through; fs-safe / not-found handler covers it.
+  }
+  return { rootDir: workspaceDir, relativePath: name };
+}
+
 async function statWorkspaceFileSafely(
   workspaceDir: string,
   name: string,
@@ -149,11 +172,28 @@ async function statWorkspaceFileSafely(
   try {
     const workspaceReal = await fs.realpath(workspaceDir);
     const candidatePath = path.resolve(workspaceReal, name);
+
+    const pathStat = await fs.lstat(candidatePath);
+
+    if (pathStat.isSymbolicLink()) {
+      const realTarget = await fs.realpath(candidatePath);
+      const workspaceParent = path.dirname(workspaceReal);
+      if (!isPathInsideDirectory(workspaceParent, realTarget)) {
+        return null;
+      }
+      const realStat = await fs.stat(realTarget);
+      if (!realStat.isFile() || realStat.nlink > 1) {
+        return null;
+      }
+      return {
+        size: realStat.size,
+        updatedAtMs: Math.floor(realStat.mtimeMs),
+      };
+    }
+
     if (!isPathInsideDirectory(workspaceReal, candidatePath)) {
       return null;
     }
-
-    const pathStat = await fs.lstat(candidatePath);
     if (!pathStat.isFile() || pathStat.nlink > 1) {
       return null;
     }
@@ -716,11 +756,12 @@ export const agentsHandlers: GatewayRequestHandlers = {
     }
     const { agentId, workspaceDir, name } = resolved;
     const filePath = path.join(workspaceDir, name);
+    const readTarget = await resolveWorkspaceFileTarget(workspaceDir, name);
     let safeRead: Awaited<ReturnType<typeof readFileWithinRoot>>;
     try {
       safeRead = await agentsHandlerDeps.readFileWithinRoot({
-        rootDir: workspaceDir,
-        relativePath: name,
+        rootDir: readTarget.rootDir,
+        relativePath: readTarget.relativePath,
         rejectHardlinks: true,
         nonBlockingRead: true,
       });
@@ -769,10 +810,11 @@ export const agentsHandlers: GatewayRequestHandlers = {
     await fs.mkdir(workspaceDir, { recursive: true });
     const filePath = path.join(workspaceDir, name);
     const content = params.content;
+    const writeTarget = await resolveWorkspaceFileTarget(workspaceDir, name);
     try {
       await agentsHandlerDeps.writeFileWithinRoot({
-        rootDir: workspaceDir,
-        relativePath: name,
+        rootDir: writeTarget.rootDir,
+        relativePath: writeTarget.relativePath,
         data: content,
         encoding: "utf8",
       });

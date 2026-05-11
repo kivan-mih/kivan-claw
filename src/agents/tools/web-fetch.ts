@@ -1,3 +1,4 @@
+import { hasProxyEnvConfigured } from "../../infra/net/proxy-env.js";
 import { Type } from "typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { SsrFBlockedError, type LookupFn, type SsrFPolicy } from "../../infra/net/ssrf.js";
@@ -436,7 +437,7 @@ async function runWebFetch(params: WebFetchRuntimeParams): Promise<Record<string
       maxRedirects: params.maxRedirects,
       timeoutSeconds: params.timeoutSeconds,
       lookupFn: params.lookupFn,
-      useEnvProxy: useTrustedEnvProxy,
+      useEnvProxy: hasProxyEnvConfigured(),
       policy: ssrfPolicy,
       init: {
         headers: {

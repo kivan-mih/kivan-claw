@@ -216,7 +216,8 @@ describe("browser navigation guard", () => {
         lookupFn,
       }),
     ).resolves.toBeUndefined();
-    expect(lookupFn).toHaveBeenCalledWith("example.com", { all: true });
+    // Node-side DNS is skipped on proxy-only hosts.
+    expect(lookupFn).not.toHaveBeenCalled();
   });
 
   it("blocks explicit browser proxy routing in strict SSRF mode", async () => {

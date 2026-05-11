@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { hasProxyEnvConfigured } from "../infra/net/proxy-env.js";
 import {
   isPrivateNetworkAllowedByPolicy,
   resolvePinnedHostnameWithPolicy,
@@ -140,6 +141,14 @@ export async function assertBrowserNavigationAllowed(
     throw new InvalidBrowserNavigationUrlError(
       "Navigation blocked: strict browser SSRF policy requires an IP-literal URL because browser DNS rebinding protections are unavailable for hostname-based navigation",
     );
+  }
+
+  // Skip Node-side pinned DNS when an env proxy is configured: the browser and
+  // the Gateway provider both route through the proxy, and direct DNS may not
+  // resolve on proxy-only hosts. The earlier strict-mode hostname check above
+  // still enforces the allowlist when `dangerouslyAllowPrivateNetwork === false`.
+  if (hasProxyEnvConfigured()) {
+    return;
   }
 
   await resolvePinnedHostnameWithPolicy(parsed.hostname, {

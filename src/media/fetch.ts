@@ -3,8 +3,9 @@ import { formatErrorMessage } from "../infra/errors.js";
 import {
   fetchWithSsrFGuard,
   withStrictGuardedFetchMode,
-  withTrustedExplicitProxyGuardedFetchMode,
+  withTrustedEnvProxyGuardedFetchMode,
 } from "../infra/net/fetch-guard.js";
+import { hasProxyEnvConfigured } from "../infra/net/proxy-env.js";
 import type { LookupFn, PinnedDispatcherPolicy, SsrFPolicy } from "../infra/net/ssrf.js";
 import { redactSensitiveText } from "../logging/redact.js";
 import { MAX_DOCUMENT_BYTES } from "./constants.js";
@@ -120,7 +121,6 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
     dispatcherPolicy,
     dispatcherAttempts,
     shouldRetryFetchError,
-    trustExplicitProxyDns,
   } = options;
   const sourceUrl = redactMediaUrl(url);
 
@@ -131,11 +131,14 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
     dispatcherAttempts && dispatcherAttempts.length > 0
       ? dispatcherAttempts
       : [{ dispatcherPolicy, lookupFn }];
-  const runGuardedFetch = async (attempt: FetchDispatcherAttempt) =>
+
+    const wrapper = hasProxyEnvConfigured()
+        ? withTrustedEnvProxyGuardedFetchMode
+        : withStrictGuardedFetchMode;
+
+    const runGuardedFetch = async (attempt: FetchDispatcherAttempt) =>
     await fetchWithSsrFGuard(
-      (trustExplicitProxyDns && attempt.dispatcherPolicy?.mode === "explicit-proxy"
-        ? withTrustedExplicitProxyGuardedFetchMode
-        : withStrictGuardedFetchMode)({
+        wrapper({
         url,
         fetchImpl,
         init: requestInit,

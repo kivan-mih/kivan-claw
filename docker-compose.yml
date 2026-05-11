@@ -1,10 +1,11 @@
 services:
-  openclaw-gateway:
-    image: ${OPENCLAW_IMAGE:-openclaw:local}
+  kivan-claw-openclaw-gateway:
+    image: ${OPENCLAW_IMAGE}
     build: .
+    restart: unless-stopped
     env_file:
-      - path: .env
-        required: false
+      - .env
+    init: true
     environment:
       HOME: /home/node
       TERM: xterm-256color
@@ -18,26 +19,20 @@ services:
       OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
-      # Empty means auto: Bonjour disables itself in detected containers.
-      # Set 0 only on host/macvlan/mDNS-capable networks; set 1 to force off.
-      OPENCLAW_DISABLE_BONJOUR: ${OPENCLAW_DISABLE_BONJOUR:-}
-      # OpenTelemetry export is outbound OTLP/HTTP from the Gateway. Prometheus
-      # uses the existing authenticated Gateway route; it does not need a port.
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
-      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
-      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
-      OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-}
-      OPENCLAW_OTEL_PRELOADED: ${OPENCLAW_OTEL_PRELOADED:-}
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      NO_PROXY: ${NO_PROXY:-}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR:-${HOME:-/tmp}/.openclaw}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR:-${HOME:-/tmp}/.openclaw/workspace}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - /home/kivan/.ssh:/home/node/.ssh:ro
+      - ./.gitconfig:/home/node/.gitconfig:ro
       ## Uncomment the lines below to enable sandbox isolation
       ## (agents.defaults.sandbox). Requires Docker CLI in the image
       ## (build with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1) or use
@@ -46,24 +41,17 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock
     # group_add:
     #   - "${DOCKER_GID:-999}"
-    # Let bundled local-model providers reach host-side LM Studio/Ollama via
-    # http://host.docker.internal:<port>. Docker Desktop usually provides this
-    # alias; the host-gateway mapping makes it work on Linux Docker Engine too.
-    cap_drop:
-      - NET_RAW
-      - NET_ADMIN
-    security_opt:
-      - no-new-privileges:true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
-    init: true
-    restart: unless-stopped
+    networks:
+      - claw2
+    #ports:
+    #  - "127.0.0.1:9990-9999:9990-9999"
+    #  - "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
+    #  - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     command:
       [
         "node",
+        "--import",
+        "./proxy_fix.ts",
         "dist/index.js",
         "gateway",
         "--bind",
@@ -84,12 +72,10 @@ services:
       retries: 5
       start_period: 20s
 
-  openclaw-cli:
+  kivan-claw-openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
-    network_mode: "service:openclaw-gateway"
     env_file:
-      - path: .env
-        required: false
+      - .env
     cap_drop:
       - NET_RAW
       - NET_ADMIN
@@ -108,13 +94,27 @@ services:
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      NO_PROXY: ${NO_PROXY:-}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
-      - ${OPENCLAW_CONFIG_DIR:-${HOME:-/tmp}/.openclaw}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR:-${HOME:-/tmp}/.openclaw/workspace}:/home/node/.openclaw/workspace
+      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - ./.gitconfig:/home/node/.gitconfig:ro
     stdin_open: true
     tty: true
     init: true
-    entrypoint: ["node", "dist/index.js"]
+    entrypoint: ["node", "--import", "./proxy_fix.ts", "dist/index.js"]
     depends_on:
-      - openclaw-gateway
+      - kivan-claw-openclaw-gateway
+    networks:
+      - claw2
+
+networks:
+  claw2:
+    name: claw2
+    external: true
+    driver: bridge
