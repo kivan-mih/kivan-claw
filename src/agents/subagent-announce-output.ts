@@ -283,24 +283,44 @@ function formatSubagentPartialProgress(
   return parts.join("\n\n") || undefined;
 }
 
+type SubagentSelectedOutput =
+  | { kind: "text"; text: string }
+  | { kind: "silent" }
+  | { kind: "no-usable-reply" };
+
+function selectSubagentOutputStructured(
+  snapshot: SubagentOutputSnapshot,
+  outcome?: SubagentRunOutcome,
+): SubagentSelectedOutput {
+  if (snapshot.waitingForContinuation) {
+    return { kind: "no-usable-reply" };
+  }
+  if (snapshot.latestSilentText) {
+    return { kind: "silent" };
+  }
+  if (snapshot.latestAssistantText) {
+    return { kind: "text", text: snapshot.latestAssistantText };
+  }
+  const partial = formatSubagentPartialProgress(snapshot, outcome);
+  if (partial) {
+    return { kind: "text", text: partial };
+  }
+  // Never surface latestRawText (raw tool-result blob, e.g. a Read body) as a child reply.
+  return { kind: "no-usable-reply" };
+}
+
 function selectSubagentOutputText(
   snapshot: SubagentOutputSnapshot,
   outcome?: SubagentRunOutcome,
 ): string | undefined {
-  if (snapshot.waitingForContinuation) {
-    return undefined;
-  }
-  if (snapshot.latestSilentText) {
+  const selected = selectSubagentOutputStructured(snapshot, outcome);
+  if (selected.kind === "silent") {
     return snapshot.latestSilentText;
   }
-  if (snapshot.latestAssistantText) {
-    return snapshot.latestAssistantText;
+  if (selected.kind === "text") {
+    return selected.text;
   }
-  const partialProgress = formatSubagentPartialProgress(snapshot, outcome);
-  if (partialProgress) {
-    return partialProgress;
-  }
-  return snapshot.latestRawText;
+  return undefined;
 }
 
 export async function readSubagentOutput(
