@@ -910,7 +910,13 @@ export async function runEmbeddedPiAgent(
             ? overloadFailoverBackoffMs
             : reason === "rate_limit"
               ? 5_000
-              : 5_000;
+              : reason === "timeout"
+                ? 5_000
+                : reason === "unclassified"
+                  ? 5_000
+                  : reason === "unknown"
+                    ? 5_000
+                    : 5_000;
         if (delayMs <= 0) {
           return;
         }
