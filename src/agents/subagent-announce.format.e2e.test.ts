@@ -557,6 +557,41 @@ describe("subagent announce formatting", () => {
     );
   });
 
+  it.each([
+    { role: "toolResult", toolOutput: "tool output line 1", childRunId: "run-tool-fallback-1" },
+    { role: "tool", toolOutput: "tool output line 2", childRunId: "run-tool-fallback-2" },
+  ] as const)(
+    "falls back to latest $role output when assistant reply is empty",
+    async (testCase) => {
+      chatHistoryMock.mockResolvedValueOnce({
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "" }],
+          },
+          {
+            role: testCase.role,
+            content: [{ type: "text", text: testCase.toolOutput }],
+          },
+        ],
+      });
+      readLatestAssistantReplyMock.mockResolvedValue("");
+
+      await runSubagentAnnounceFlow({
+        childSessionKey: "agent:main:subagent:worker",
+        childRunId: testCase.childRunId,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        ...defaultOutcomeAnnounce,
+        waitForCompletion: false,
+      });
+
+      const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
+      const msg = call?.params?.message as string;
+      expect(msg).toContain(testCase.toolOutput);
+    },
+  );
+
   it("uses latest assistant text when it appears after a tool output", async () => {
     chatHistoryMock.mockResolvedValueOnce({
       messages: [
@@ -1894,6 +1929,39 @@ describe("subagent announce formatting", () => {
     const msg = call?.params?.message as string;
     expect(msg).toContain("assistant completion text");
     expect(msg).not.toContain("old tool output");
+  });
+
+  it("falls back to latest tool output for completion-mode when assistant output is empty", async () => {
+    chatHistoryMock.mockResolvedValueOnce({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+        },
+        {
+          role: "toolResult",
+          content: [{ type: "text", text: "tool output only" }],
+        },
+      ],
+    });
+    readLatestAssistantReplyMock.mockResolvedValue("");
+
+    const didAnnounce = await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:worker",
+      childRunId: "run-completion-tool-output",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      requesterOrigin: { channel: "discord", to: "channel:12345", accountId: "acct-1" },
+      expectsCompletionMessage: true,
+      ...defaultOutcomeAnnounce,
+    });
+
+    expect(didAnnounce).toBe(true);
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(agentSpy).toHaveBeenCalledTimes(1);
+    const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
+    const msg = call?.params?.message as string;
+    expect(msg).toContain("tool output only");
   });
 
   it("ignores user text when deriving fallback completion output", async () => {
