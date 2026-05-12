@@ -905,14 +905,20 @@ export async function runEmbeddedPiAgent(
           policy: params.authProfileFailurePolicy,
         });
       const maybeBackoffBeforeOverloadFailover = async (reason: FailoverReason | null) => {
-        if (reason !== "overloaded" || overloadFailoverBackoffMs <= 0) {
+        const delayMs =
+          reason === "overloaded"
+            ? overloadFailoverBackoffMs
+            : reason === "rate_limit"
+              ? 5_000
+              : 5_000;
+        if (delayMs <= 0) {
           return;
         }
         log.warn(
-          `overload backoff before failover for ${provider}/${modelId}: delayMs=${overloadFailoverBackoffMs}`,
+          `${reason} backoff before failover for ${provider}/${modelId}: delayMs=${delayMs}`,
         );
         try {
-          await sleepWithAbort(overloadFailoverBackoffMs, params.abortSignal);
+          await sleepWithAbort(delayMs, params.abortSignal);
         } catch (err) {
           if (params.abortSignal?.aborted) {
             const abortErr = new Error("Operation aborted", { cause: err });
