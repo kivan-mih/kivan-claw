@@ -321,7 +321,11 @@ import {
 } from "./history-image-prune.js";
 import { detectAndLoadPromptImages } from "./images.js";
 import { buildAttemptReplayMetadata } from "./incomplete-turn.js";
-import { resolveLlmIdleTimeoutMs, streamWithIdleTimeout } from "./llm-idle-timeout.js";
+import {
+  resolveLlmFirstByteTimeoutMs,
+  resolveLlmIdleTimeoutMs,
+  streamWithIdleTimeout,
+} from "./llm-idle-timeout.js";
 import { resolveMessageMergeStrategy } from "./message-merge-strategy.js";
 import {
   MID_TURN_PRECHECK_ERROR_MESSAGE,
@@ -2117,11 +2121,19 @@ export async function runEmbeddedAttempt(
         modelRequestTimeoutMs: (params.model as { requestTimeoutMs?: number }).requestTimeoutMs,
         model: params.model as { baseUrl?: string },
       });
+      const firstByteTimeoutMs = resolveLlmFirstByteTimeoutMs({
+        cfg: params.config,
+        trigger: params.trigger,
+        runTimeoutMs: params.timeoutMs !== configuredRunTimeoutMs ? params.timeoutMs : undefined,
+        modelRequestTimeoutMs: (params.model as { requestTimeoutMs?: number }).requestTimeoutMs,
+        model: params.model as { baseUrl?: string },
+      });
       if (idleTimeoutMs > 0) {
         activeSession.agent.streamFn = streamWithIdleTimeout(
           activeSession.agent.streamFn,
           idleTimeoutMs,
           (error) => idleTimeoutTrigger?.(error),
+          firstByteTimeoutMs > 0 ? { firstByteTimeoutMs } : undefined,
         );
       }
       let diagnosticModelCallSeq = 0;

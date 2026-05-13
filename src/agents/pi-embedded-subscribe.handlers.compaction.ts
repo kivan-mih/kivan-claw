@@ -6,6 +6,14 @@ import { makeZeroUsageSnapshot } from "./usage.js";
 
 export function handleCompactionStart(ctx: EmbeddedPiSubscribeContext) {
   ctx.state.compactionInFlight = true;
+  // Mark overflow recovery as in progress so that any agent_end event emitted
+  // during this compaction window suppresses its requester-facing terminal
+  // emit. The literal-match check in handleAgentEnd covers the *first*
+  // synthetic-overflow event (which fires before this handler runs); this flag
+  // is the secondary gate for any subsequent agent_end during the compaction
+  // pause (e.g., a streaming nuance, an aborted retry, or compaction-internal
+  // tool errors).
+  ctx.state.pendingOverflowRecovery = true;
   ctx.state.livenessState = "paused";
   ctx.ensureCompactionPromise();
   ctx.log.debug(`embedded run compaction start: runId=${ctx.params.runId}`);
@@ -72,10 +80,17 @@ export function handleCompactionEnd(
     ctx.noteCompactionRetry();
     ctx.resetForCompactionRetry();
     ctx.log.debug(`embedded run compaction retry: runId=${ctx.params.runId}`);
+    // Keep `pendingOverflowRecovery` set: the retry hasn't fired yet and any
+    // synthetic-overflow agent_end during the retry should still suppress the
+    // requester-facing terminal emit.
   } else {
     if (!wasAborted) {
       ctx.state.livenessState = "working";
     }
+    // Recovery window closed (no retry coming). Clear the flag so a
+    // subsequent genuinely terminal agent_end propagates phase:"error"
+    // to the requester normally.
+    ctx.state.pendingOverflowRecovery = false;
     ctx.maybeResolveCompactionWait();
     clearStaleAssistantUsageOnSessionMessages(ctx);
   }

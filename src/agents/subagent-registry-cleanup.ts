@@ -51,6 +51,30 @@ export function resolveDeferredCleanupDecision(params: {
     return { kind: "defer-descendants", delayMs: params.deferDescendantDelayMs };
   }
 
+  // A retry hint set on the entry (typically by a "provider in cooldown"
+  // delivery failure) means we know the failure won't clear within the
+  // exponential-backoff budget. Skip the retry-count increment so the loop
+  // doesn't give up after 3 fast attempts during a multi-minute cooldown,
+  // and use the hint as a floor for the resume delay (capped at the hard
+  // expiry budget remaining so we don't schedule beyond give-up time).
+  const retryHintMs = params.entry.lastAnnounceRetryHintMs;
+  const hasValidRetryHint =
+    typeof retryHintMs === "number" && Number.isFinite(retryHintMs) && retryHintMs > 0;
+  const hardBudgetRemainingMs = params.announceCompletionHardExpiryMs - endedAgo;
+  if (hasValidRetryHint && isCompletionMessageFlow && hardBudgetRemainingMs > 0) {
+    const cappedHintMs = Math.min(retryHintMs as number, hardBudgetRemainingMs);
+    const baseDelayMs = params.resolveAnnounceRetryDelayMs(
+      (params.entry.announceRetryCount ?? 0) + 1,
+    );
+    return {
+      kind: "retry",
+      // Do not increment the counter for hint-driven retries. The hard
+      // expiry above is the upper bound that keeps the loop terminating.
+      retryCount: params.entry.announceRetryCount ?? 0,
+      resumeDelayMs: Math.max(baseDelayMs, cappedHintMs),
+    };
+  }
+
   const retryCount = (params.entry.announceRetryCount ?? 0) + 1;
   const expiryExceeded = isCompletionMessageFlow
     ? completionHardExpiryExceeded

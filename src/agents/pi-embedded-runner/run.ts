@@ -119,6 +119,7 @@ import {
   resolveFinalAssistantRawText,
   resolveFinalAssistantVisibleText,
   resolveMaxRunRetryIterations,
+  resolveMaxSameModelIdleTimeoutRetries,
   resolveReportedModelRef,
   resolveOverloadFailoverBackoffMs,
   resolveOverloadProfileRotationLimit,
@@ -173,7 +174,6 @@ import { createUsageAccumulator, mergeUsageIntoAccumulator } from "./usage-accum
 
 type ApiKeyInfo = ResolvedProviderAuth;
 
-const MAX_SAME_MODEL_IDLE_TIMEOUT_RETRIES = 1;
 const EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS = 30_000;
 const MID_TURN_PRECHECK_CONTINUATION_PROMPT =
   "Continue from the current transcript after the latest tool result. Do not repeat the original user request, and do not rerun completed tools unless the transcript shows they are still needed.";
@@ -781,6 +781,11 @@ export async function runEmbeddedPiAgent(
       let emptyResponseRetryAttempts = 0;
       let compactionContinuationRetryAttempts = 0;
       let sameModelIdleTimeoutRetries = 0;
+      // Counts same-model retries triggered by HTTP 429 (rate_limit) when no
+      // fallback model is configured. Each retry waits resolveRateLimitRetryBackoffMs(N)
+      // before the next attempt; once the counter reaches the cap, the runner
+      // surfaces the error so the announce + lifecycle channels propagate it.
+      let rateLimitSameModelRetries = 0;
       // Cost-runaway breaker for #76293. State lives at the run-loop level
       // on purpose so it survives across attempt boundaries and across
       // profile/auth retries within this embedded run (a wrapper-local
@@ -905,14 +910,26 @@ export async function runEmbeddedPiAgent(
           policy: params.authProfileFailurePolicy,
         });
       const maybeBackoffBeforeOverloadFailover = async (reason: FailoverReason | null) => {
-        if (reason !== "overloaded" || overloadFailoverBackoffMs <= 0) {
+        const delayMs =
+          reason === "overloaded"
+            ? overloadFailoverBackoffMs
+            : reason === "rate_limit"
+              ? 5_000
+              : reason === "timeout"
+                ? 5_000
+                : reason === "unclassified"
+                  ? 5_000
+                  : reason === "unknown"
+                    ? 5_000
+                    : 5_000;
+        if (delayMs <= 0) {
           return;
         }
         log.warn(
-          `overload backoff before failover for ${provider}/${modelId}: delayMs=${overloadFailoverBackoffMs}`,
+          `${reason} backoff before failover for ${provider}/${modelId}: delayMs=${delayMs}`,
         );
         try {
-          await sleepWithAbort(overloadFailoverBackoffMs, params.abortSignal);
+          await sleepWithAbort(delayMs, params.abortSignal);
         } catch (err) {
           if (params.abortSignal?.aborted) {
             const abortErr = new Error("Operation aborted", { cause: err });
@@ -2138,8 +2155,14 @@ export async function runEmbeddedPiAgent(
               idleTimedOut &&
               !timedOutDuringCompaction &&
               !fallbackConfigured &&
-              canRestartForLiveSwitch &&
-              sameModelIdleTimeoutRetries < MAX_SAME_MODEL_IDLE_TIMEOUT_RETRIES,
+              // Note: canRestartForLiveSwitch is intentionally NOT required
+              // here. That guard exists for *swapping* models mid-run (where
+              // partial output from the current attempt is lost); same-model
+              // retry only re-issues the failed model_call, so partial
+              // streaming output (which is discarded on abort anyway) is not
+              // a concern. The flag still guards the live-switch path at the
+              // requestedSelection branch above.
+              sameModelIdleTimeoutRetries < resolveMaxSameModelIdleTimeoutRetries(),
             assistantProfileFailureReason,
             lastProfileId,
             modelId,
@@ -2155,6 +2178,9 @@ export async function runEmbeddedPiAgent(
             isProbeSession,
             overloadProfileRotations,
             overloadProfileRotationLimit,
+            rateLimitSameModelRetries,
+            sameModelIdleTimeoutRetries,
+            abortSignal: params.abortSignal,
             previousRetryFailoverReason: lastRetryFailoverReason,
             logAssistantFailoverDecision,
             warn: (message) => log.warn(message),
@@ -2165,20 +2191,28 @@ export async function runEmbeddedPiAgent(
           });
           overloadProfileRotations = assistantFailoverOutcome.overloadProfileRotations;
           if (assistantFailoverOutcome.action === "retry") {
+            // The counters for same-model retries are advanced inside the
+            // failover helpers (sameModelRateLimitRetry / sameModelIdleTimeoutRetry)
+            // and returned via the outcome. Mirror them here so the next gate
+            // evaluation reads the updated attempt count.
+            if (typeof assistantFailoverOutcome.rateLimitSameModelRetries === "number") {
+              rateLimitSameModelRetries = assistantFailoverOutcome.rateLimitSameModelRetries;
+            }
+            if (typeof assistantFailoverOutcome.sameModelIdleTimeoutRetries === "number") {
+              sameModelIdleTimeoutRetries = assistantFailoverOutcome.sameModelIdleTimeoutRetries;
+            }
             traceAttempts.push({
               provider: activeErrorContext.provider,
               model: activeErrorContext.model,
               result:
                 assistantFailoverOutcome.retryKind === "same_model_idle_timeout" ||
+                assistantFailoverOutcome.retryKind === "same_model_rate_limit" ||
                 assistantFailoverReason === "timeout"
                   ? "timeout"
                   : "rotate_profile",
               ...(assistantFailoverReason ? { reason: assistantFailoverReason } : {}),
               stage: "assistant",
             });
-            if (assistantFailoverOutcome.retryKind === "same_model_idle_timeout") {
-              sameModelIdleTimeoutRetries += 1;
-            }
             lastRetryFailoverReason = assistantFailoverOutcome.lastRetryFailoverReason;
             continue;
           }

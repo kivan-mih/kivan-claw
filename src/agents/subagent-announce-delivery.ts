@@ -1140,6 +1140,41 @@ async function sendSubagentAnnounceDirectly(params: {
   }
 }
 
+/**
+ * Recognizes the "provider in cooldown" error string produced by the model
+ * fallback chain (see `model-fallback.ts:770` and `:907`). The cooldown is set
+ * elsewhere (e.g. by a subagent's own 429), so by the time the announce flow
+ * runs its own model_call the cooldown is already in place and the call
+ * surfaces as a fallback-chain-exhausted error containing this phrase.
+ *
+ * When detected we attach a `retryAfterMs` hint so the cleanup-retry loop
+ * waits the cooldown out instead of burning the 1/2/4s exponential-backoff
+ * budget in ~7s and giving up — the typical cooldown is multiple minutes.
+ */
+const COOLDOWN_DELIVERY_ERROR_PATTERN = /\bis in cooldown\b/i;
+/**
+ * Default hint when delivery fails with a "provider in cooldown" error.
+ * 120s is long enough that one retry per hint covers typical short cooldowns
+ * in a single wait, and short enough that ANNOUNCE_COMPLETION_HARD_EXPIRY_MS
+ * (30 min) leaves room for ~15 successive retries against a long cooldown.
+ *
+ * Kept as a constant rather than a config knob — the exact value rarely
+ * matters because the cleanup decision tree honors it as a *floor*, so a
+ * cooldown that ends sooner causes the retry to wake on its scheduled tick
+ * and discover the provider is back.
+ */
+const DEFAULT_COOLDOWN_RETRY_HINT_MS = 120_000;
+
+function classifyDeliveryRetryAfterMs(error: string | undefined): number | undefined {
+  if (typeof error !== "string" || error.length === 0) {
+    return undefined;
+  }
+  if (COOLDOWN_DELIVERY_ERROR_PATTERN.test(error)) {
+    return DEFAULT_COOLDOWN_RETRY_HINT_MS;
+  }
+  return undefined;
+}
+
 export async function deliverSubagentAnnouncement(params: {
   requesterSessionKey: string;
   announceId?: string;
@@ -1161,7 +1196,7 @@ export async function deliverSubagentAnnouncement(params: {
   directIdempotencyKey: string;
   signal?: AbortSignal;
 }): Promise<SubagentAnnounceDeliveryResult> {
-  return await runSubagentAnnounceDispatch({
+  const result = await runSubagentAnnounceDispatch({
     expectsCompletionMessage: params.expectsCompletionMessage,
     signal: params.signal,
     queue: async () =>
@@ -1197,6 +1232,28 @@ export async function deliverSubagentAnnouncement(params: {
         bestEffortDeliver: params.bestEffortDeliver,
       }),
   });
+  if (result.delivered) {
+    return result;
+  }
+  // Attach retryAfterMs when the failure is recognizably a provider cooldown.
+  // The cleanup-retry scheduler uses this hint to wait the cooldown out
+  // instead of exhausting the 1/2/4s exponential-backoff budget within ~7s
+  // and giving up. Looks at the dispatch-level error and, defensively, at
+  // any phase-level error so a cooldown surfaced in queue or direct flow is
+  // both captured.
+  const aggregateErrors: Array<string | undefined> = [result.error];
+  if (Array.isArray(result.phases)) {
+    for (const phase of result.phases) {
+      aggregateErrors.push(phase.error);
+    }
+  }
+  for (const errStr of aggregateErrors) {
+    const retryAfterMs = classifyDeliveryRetryAfterMs(errStr);
+    if (typeof retryAfterMs === "number" && retryAfterMs > 0) {
+      return { ...result, retryAfterMs };
+    }
+  }
+  return result;
 }
 
 export const __testing = {

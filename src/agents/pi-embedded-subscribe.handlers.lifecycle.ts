@@ -8,6 +8,8 @@ import {
 import { classifyFailoverReason, formatAssistantErrorText } from "./pi-embedded-helpers.js";
 import { hasCommittedMessagingToolDeliveryEvidence } from "./pi-embedded-runner/delivery-evidence.js";
 import { isIncompleteTerminalAssistantTurn } from "./pi-embedded-runner/run/incomplete-turn.js";
+import { PREEMPTIVE_OVERFLOW_ERROR_TEXT } from "./pi-embedded-runner/run/preemptive-compaction.js";
+import { PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE } from "./pi-embedded-runner/tool-result-context-guard.js";
 import {
   consumePendingToolMediaReply,
   hasAssistantVisibleReply,
@@ -15,6 +17,34 @@ import {
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
 import { isPromiseLike } from "./pi-embedded-subscribe.promise.js";
 import { isAssistantMessage } from "./pi-embedded-utils.js";
+
+/**
+ * Synthetic context-overflow error messages produced by openclaw's own
+ * preemptive guards (the tool-loop char guard in `tool-result-context-guard.ts`
+ * and the pre-prompt token-budget precheck in `run/preemptive-compaction.ts`).
+ *
+ * When the last assistant turn ended with one of these as its `errorMessage`,
+ * the embedded runner is about to run an overflow-recovery compaction + retry
+ * (see `pi-embedded-runner/run.ts` overflow recovery branch around line 1538).
+ * Compaction is neither success nor failure — it is a recoverable internal
+ * pause. The requester (parent agent for subagent runs) must not be told the
+ * subagent has "ended in error" mid-recovery, otherwise it may treat the
+ * subagent as terminated and spawn a replacement before the retry completes.
+ *
+ * Local `emitAgentEvent` continues to fire for observability; only the
+ * requester-facing `onAgentEvent` is suppressed.
+ */
+const SYNTHETIC_OVERFLOW_RECOVERY_ERROR_MESSAGES = new Set<string>([
+  PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
+  PREEMPTIVE_OVERFLOW_ERROR_TEXT,
+]);
+
+function isRecoverableOverflowSynthetic(errorMessage: string | undefined): boolean {
+  if (typeof errorMessage !== "string" || errorMessage.length === 0) {
+    return false;
+  }
+  return SYNTHETIC_OVERFLOW_RECOVERY_ERROR_MESSAGES.has(errorMessage);
+}
 
 export {
   handleCompactionEnd,
@@ -122,6 +152,18 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
       ...(ctx.state.yielded === true ? { yielded: true } : {}),
     };
     if (isError) {
+      // Suppress the requester-facing terminal event when the failure shape is
+      // a recoverable openclaw-internal overflow (either the tool-loop char
+      // guard or the pre-prompt token-budget precheck). The embedded runner
+      // is about to compact and retry; surfacing `phase: "error"` to the
+      // requester now causes parent agents to misread the subagent as
+      // terminated mid-recovery (see openclaw#73864 / RGS-RES-001 incident).
+      // The flag `ctx.state.pendingOverflowRecovery` (true while compaction
+      // is in flight) acts as a secondary gate for any subsequent agent_end
+      // emitted during that window.
+      const suppressRequesterTerminal =
+        isRecoverableOverflowSynthetic(lastAssistant?.errorMessage) ||
+        ctx.state.pendingOverflowRecovery === true;
       emitAgentEvent({
         runId: ctx.params.runId,
         stream: "lifecycle",
@@ -132,18 +174,25 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
           ...(livenessState ? { livenessState } : {}),
           ...(replayInvalid ? { replayInvalid } : {}),
           endedAt: Date.now(),
+          ...(suppressRequesterTerminal ? { recoverableOverflow: true } : {}),
         },
       });
-      void ctx.params.onAgentEvent?.({
-        stream: "lifecycle",
-        data: {
-          phase: "error",
-          error: lifecycleErrorText ?? "LLM request failed.",
-          ...terminalMeta,
-          ...(livenessState ? { livenessState } : {}),
-          ...(replayInvalid ? { replayInvalid } : {}),
-        },
-      });
+      if (!suppressRequesterTerminal) {
+        void ctx.params.onAgentEvent?.({
+          stream: "lifecycle",
+          data: {
+            phase: "error",
+            error: lifecycleErrorText ?? "LLM request failed.",
+            ...terminalMeta,
+            ...(livenessState ? { livenessState } : {}),
+            ...(replayInvalid ? { replayInvalid } : {}),
+          },
+        });
+      } else {
+        ctx.log.debug(
+          `embedded run agent end: suppressing requester-facing phase=error for recoverable overflow runId=${ctx.params.runId}`,
+        );
+      }
       return;
     }
     emitAgentEvent({

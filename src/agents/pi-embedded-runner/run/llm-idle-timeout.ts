@@ -1,6 +1,9 @@
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import { streamSimple } from "@mariozechner/pi-ai";
-import { DEFAULT_LLM_IDLE_TIMEOUT_SECONDS } from "../../../config/agent-timeout-defaults.js";
+import {
+  DEFAULT_LLM_FIRST_BYTE_TIMEOUT_SECONDS,
+  DEFAULT_LLM_IDLE_TIMEOUT_SECONDS,
+} from "../../../config/agent-timeout-defaults.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { createStreamIteratorWrapper } from "../../stream-iterator-wrapper.js";
 import type { EmbeddedRunTrigger } from "./params.js";
@@ -9,6 +12,14 @@ import type { EmbeddedRunTrigger } from "./params.js";
  * Default idle timeout for LLM streaming responses in milliseconds.
  */
 export const DEFAULT_LLM_IDLE_TIMEOUT_MS = DEFAULT_LLM_IDLE_TIMEOUT_SECONDS * 1000;
+
+/**
+ * Default wall-clock budget for the FIRST chunk from a cloud provider.
+ * After the first chunk is received the watchdog switches to the per-chunk
+ * idle timeout. Distinct from DEFAULT_LLM_IDLE_TIMEOUT_MS so a totally silent
+ * provider is caught fast without cutting off legitimate slow-stream reasoning.
+ */
+export const DEFAULT_LLM_FIRST_BYTE_TIMEOUT_MS = DEFAULT_LLM_FIRST_BYTE_TIMEOUT_SECONDS * 1000;
 
 /**
  * Maximum safe timeout value (approximately 24.8 days).
@@ -166,19 +177,92 @@ export function resolveLlmIdleTimeoutMs(params?: {
 }
 
 /**
+ * Resolves the LLM first-byte timeout — the wall-clock budget for the very
+ * first chunk from the provider. After the first chunk arrives, the regular
+ * idle timeout takes over. Returns 0 to disable (no first-byte cap).
+ *
+ * Mirrors `resolveLlmIdleTimeoutMs` for the local-provider exemption and
+ * the cron-run override, but caps to `DEFAULT_LLM_FIRST_BYTE_TIMEOUT_MS`
+ * so a wide `runTimeoutMs` doesn't inadvertently let the first-byte budget
+ * grow as large as the run itself.
+ */
+export function resolveLlmFirstByteTimeoutMs(params?: {
+  cfg?: OpenClawConfig;
+  trigger?: EmbeddedRunTrigger;
+  runTimeoutMs?: number;
+  modelRequestTimeoutMs?: number;
+  model?: { baseUrl?: string };
+}): number {
+  const clampTimeoutMs = (valueMs: number) => Math.min(Math.floor(valueMs), MAX_SAFE_TIMEOUT_MS);
+  // Local providers can legitimately take many minutes before producing the
+  // first byte (prompt evaluation). The first-byte watchdog is only useful as
+  // a network-silence-as-hang guard for cloud providers.
+  const baseUrl = params?.model?.baseUrl;
+  if (typeof baseUrl === "string" && baseUrl.length > 0 && isLocalProviderBaseUrl(baseUrl)) {
+    return 0;
+  }
+  if (params?.trigger === "cron") {
+    // Cron-triggered runs already opt out of the idle watchdog; mirror that.
+    return 0;
+  }
+  // Cap by the modelRequestTimeoutMs and runTimeoutMs the same way as
+  // resolveLlmIdleTimeoutMs, so the first-byte budget never exceeds the
+  // overall request budget.
+  const runTimeoutMs = params?.runTimeoutMs;
+  const agentTimeoutSeconds = params?.cfg?.agents?.defaults?.timeoutSeconds;
+  const agentTimeoutMs =
+    typeof agentTimeoutSeconds === "number" &&
+    Number.isFinite(agentTimeoutSeconds) &&
+    agentTimeoutSeconds > 0
+      ? agentTimeoutSeconds * 1000
+      : undefined;
+  const candidates: number[] = [DEFAULT_LLM_FIRST_BYTE_TIMEOUT_MS];
+  const modelRequestTimeoutMs = params?.modelRequestTimeoutMs;
+  if (
+    typeof modelRequestTimeoutMs === "number" &&
+    Number.isFinite(modelRequestTimeoutMs) &&
+    modelRequestTimeoutMs > 0
+  ) {
+    candidates.push(modelRequestTimeoutMs);
+  }
+  if (typeof runTimeoutMs === "number" && Number.isFinite(runTimeoutMs) && runTimeoutMs > 0) {
+    candidates.push(runTimeoutMs);
+  }
+  if (agentTimeoutMs !== undefined) {
+    candidates.push(agentTimeoutMs);
+  }
+  return clampTimeoutMs(Math.min(...candidates));
+}
+
+/**
  * Wraps a stream function with idle timeout detection.
- * If no token is received within the specified timeout, the request is aborted.
+ *
+ * Two-stage watchdog:
+ *  - Before the first chunk arrives: `firstByteTimeoutMs` (if > 0) caps the
+ *    wait. A totally silent provider (no headers, no first chunk) is aborted
+ *    fast. Pass `0` to disable.
+ *  - After any chunk has arrived: `timeoutMs` caps the wait between chunks
+ *    (preserves the legacy per-chunk idle semantics).
  *
  * @param baseFn - The base stream function to wrap
- * @param timeoutMs - Idle timeout in milliseconds
- * @param onIdleTimeout - Optional callback invoked when idle timeout triggers
- * @returns A wrapped stream function with idle timeout detection
+ * @param timeoutMs - Per-chunk idle timeout in milliseconds (post-first-chunk)
+ * @param onIdleTimeout - Optional callback invoked when either timer triggers
+ * @param options.firstByteTimeoutMs - Pre-first-chunk wall-clock budget. `0`
+ *   or undefined disables the first-byte watchdog (legacy behavior).
+ * @returns A wrapped stream function with idle/first-byte timeout detection
  */
 export function streamWithIdleTimeout(
   baseFn: StreamFn,
   timeoutMs: number,
   onIdleTimeout?: (error: Error) => void,
+  options?: { firstByteTimeoutMs?: number },
 ): StreamFn {
+  const firstByteTimeoutMs =
+    typeof options?.firstByteTimeoutMs === "number" &&
+    Number.isFinite(options.firstByteTimeoutMs) &&
+    options.firstByteTimeoutMs > 0
+      ? options.firstByteTimeoutMs
+      : 0;
   return (model, context, options) => {
     const maybeStream = baseFn(model, context, options);
 
@@ -188,16 +272,22 @@ export function streamWithIdleTimeout(
         function () {
           const iterator = originalAsyncIterator();
           let idleTimer: NodeJS.Timeout | null = null;
+          let hasReceivedFirstChunk = false;
 
           const createTimeoutPromise = (): Promise<never> => {
+            const useFirstByte = !hasReceivedFirstChunk && firstByteTimeoutMs > 0;
+            const effectiveTimeoutMs = useFirstByte ? firstByteTimeoutMs : timeoutMs;
             return new Promise((_, reject) => {
               idleTimer = setTimeout(() => {
+                const seconds = Math.floor(effectiveTimeoutMs / 1000);
                 const error = new Error(
-                  `LLM idle timeout (${Math.floor(timeoutMs / 1000)}s): no response from model`,
+                  useFirstByte
+                    ? `LLM no-first-byte timeout (${seconds}s): no response from model`
+                    : `LLM idle timeout (${seconds}s): no response from model`,
                 );
                 onIdleTimeout?.(error);
                 reject(error);
-              }, timeoutMs);
+              }, effectiveTimeoutMs);
             });
           };
 
@@ -214,7 +304,10 @@ export function streamWithIdleTimeout(
               clearTimer();
 
               try {
-                // Race between the actual next() and the timeout
+                // Race between the actual next() and the timeout. While
+                // hasReceivedFirstChunk is false, createTimeoutPromise picks
+                // the (smaller) first-byte budget; once the first chunk is
+                // observed it switches to the per-chunk idle budget.
                 const result = await Promise.race([streamIterator.next(), createTimeoutPromise()]);
 
                 if (result.done) {
@@ -223,6 +316,9 @@ export function streamWithIdleTimeout(
                 }
 
                 clearTimer();
+                if (!hasReceivedFirstChunk) {
+                  hasReceivedFirstChunk = true;
+                }
                 return result;
               } catch (error) {
                 clearTimer();

@@ -50,6 +50,16 @@ export type SubagentRunRecord = {
   announceRetryCount?: number;
   lastAnnounceRetryAt?: number;
   lastAnnounceDeliveryError?: string;
+  /**
+   * Minimum delay before the next announce attempt, in milliseconds. Set when
+   * delivery fails with a recoverable rate-limit / cooldown signal so the
+   * cleanup-retry scheduler waits the cooldown out instead of burning the
+   * 1/2/4s exponential-backoff budget within ~7s and giving up. Cleared by
+   * `resolveDeferredCleanupDecision` after it is consumed for one scheduled
+   * resume, so the next attempt re-evaluates the hint based on its own
+   * outcome.
+   */
+  lastAnnounceRetryHintMs?: number;
   endedReason?: SubagentLifecycleEndedReason;
   pauseReason?: "sessions_yield";
   wakeOnDescendantSettle?: boolean;

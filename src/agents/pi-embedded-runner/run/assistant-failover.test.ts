@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FailoverError } from "../../failover-error.js";
 import { formatBillingErrorMessage } from "../../pi-embedded-helpers.js";
 import { handleAssistantFailover } from "./assistant-failover.js";
@@ -36,6 +36,9 @@ function makeParams(overrides: Partial<Params> = {}): Params {
     isProbeSession: false,
     overloadProfileRotations: 0,
     overloadProfileRotationLimit: 3,
+    rateLimitSameModelRetries: 0,
+    sameModelIdleTimeoutRetries: 0,
+    abortSignal: undefined,
     previousRetryFailoverReason: null,
     logAssistantFailoverDecision: vi.fn(),
     warn: vi.fn(),
@@ -94,13 +97,18 @@ describe("handleAssistantFailover", () => {
       expect(err.status).toBe(401);
     });
 
-    it("throws a rate_limit FailoverError for rate-limited surface errors", async () => {
+    it("throws a rate_limit FailoverError for rate-limited surface errors once the same-model retry budget is exhausted", async () => {
+      // With the same-model rate-limit retry budget exhausted (= cap), the
+      // surface_error path falls through to the existing throw branch and
+      // produces a FailoverError. Before exhaustion, the runner backs off
+      // and retries (covered in a separate test below).
       const outcome = await handleAssistantFailover(
         makeParams({
           initialDecision: { action: "surface_error", reason: "rate_limit" },
           failoverReason: "rate_limit",
           billingFailure: false,
           rateLimitFailure: true,
+          rateLimitSameModelRetries: 7,
         }),
       );
 
@@ -190,22 +198,32 @@ describe("handleAssistantFailover", () => {
     });
 
     it("retries the same model when an idle-timeout retry is allowed", async () => {
-      const outcome = await handleAssistantFailover(
-        makeParams({
-          initialDecision: { action: "surface_error", reason: null },
-          failoverReason: null,
-          timedOut: true,
-          idleTimedOut: true,
-          allowSameModelIdleTimeoutRetry: true,
-          billingFailure: false,
-        }),
-      );
+      vi.useFakeTimers();
+      try {
+        const outcomePromise = handleAssistantFailover(
+          makeParams({
+            initialDecision: { action: "surface_error", reason: null },
+            failoverReason: null,
+            timedOut: true,
+            idleTimedOut: true,
+            allowSameModelIdleTimeoutRetry: true,
+            billingFailure: false,
+          }),
+        );
 
-      expect(outcome.action).toBe("retry");
-      if (outcome.action !== "retry") {
-        return;
+        // First attempt's backoff is 5 s (mirrors the rate-limit base delay).
+        await vi.advanceTimersByTimeAsync(5_000);
+        const outcome = await outcomePromise;
+
+        expect(outcome.action).toBe("retry");
+        if (outcome.action !== "retry") {
+          return;
+        }
+        expect(outcome.retryKind).toBe("same_model_idle_timeout");
+        expect(outcome.sameModelIdleTimeoutRetries).toBe(1);
+      } finally {
+        vi.useRealTimers();
       }
-      expect(outcome.retryKind).toBe("same_model_idle_timeout");
     });
   });
 
@@ -227,6 +245,140 @@ describe("handleAssistantFailover", () => {
       expect(err.status).toBe(402);
       expect(err.message).toBe(formatBillingErrorMessage("Anthropic", "claude-haiku-4-5-20251001"));
       expect(logDecision).toHaveBeenCalledWith("fallback_model", { status: 402 });
+    });
+  });
+
+  describe("same-model rate-limit retry (exponential backoff)", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("retries same model on first 429 with 5s backoff", async () => {
+      vi.useFakeTimers();
+      const warn = vi.fn();
+      const outcomePromise = handleAssistantFailover(
+        makeParams({
+          initialDecision: { action: "surface_error", reason: "rate_limit" },
+          failoverReason: "rate_limit",
+          billingFailure: false,
+          rateLimitFailure: true,
+          rateLimitSameModelRetries: 0,
+          warn,
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const outcome = await outcomePromise;
+
+      expect(outcome.action).toBe("retry");
+      if (outcome.action !== "retry") {
+        return;
+      }
+      expect(outcome.retryKind).toBe("same_model_rate_limit");
+      expect(outcome.rateLimitSameModelRetries).toBe(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/\[rate-limit-backoff\].*attempt=1\/7 delayMs=5000/),
+      );
+    });
+
+    it("caps backoff at 5 minutes for the 7th retry", async () => {
+      vi.useFakeTimers();
+      const warn = vi.fn();
+      const outcomePromise = handleAssistantFailover(
+        makeParams({
+          initialDecision: { action: "surface_error", reason: "rate_limit" },
+          failoverReason: "rate_limit",
+          billingFailure: false,
+          rateLimitFailure: true,
+          rateLimitSameModelRetries: 6,
+          warn,
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(300_000);
+      const outcome = await outcomePromise;
+
+      expect(outcome.action).toBe("retry");
+      if (outcome.action !== "retry") {
+        return;
+      }
+      expect(outcome.rateLimitSameModelRetries).toBe(7);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/\[rate-limit-backoff\].*attempt=7\/7 delayMs=300000/),
+      );
+    });
+
+    it("falls through to surface_error once the retry budget is exhausted", async () => {
+      const outcome = await handleAssistantFailover(
+        makeParams({
+          initialDecision: { action: "surface_error", reason: "rate_limit" },
+          failoverReason: "rate_limit",
+          billingFailure: false,
+          rateLimitFailure: true,
+          rateLimitSameModelRetries: 7,
+        }),
+      );
+
+      const err = expectThrownFailoverError(outcome);
+      expect(err.reason).toBe("rate_limit");
+      expect(err.status).toBe(429);
+    });
+
+    it("does not apply when a fallback model is configured", async () => {
+      // With fallbackConfigured=true, the existing fallback_model escalation
+      // takes precedence and the new retry gate does not fire.
+      const outcome = await handleAssistantFailover(
+        makeParams({
+          initialDecision: { action: "fallback_model", reason: "rate_limit" },
+          fallbackConfigured: true,
+          failoverReason: "rate_limit",
+          billingFailure: false,
+          rateLimitFailure: true,
+          rateLimitSameModelRetries: 0,
+        }),
+      );
+
+      // fallback_model action throws a FailoverError, not retry.
+      expect(outcome.action).toBe("throw");
+    });
+
+    it("does not apply to overloaded failures (different signal)", async () => {
+      // The new retry branch is rate_limit only; "overloaded" continues to
+      // use the existing single overload backoff + rotation logic.
+      const outcome = await handleAssistantFailover(
+        makeParams({
+          initialDecision: { action: "surface_error", reason: "overloaded" },
+          failoverReason: "overloaded",
+          billingFailure: false,
+          rateLimitFailure: false,
+          rateLimitSameModelRetries: 0,
+        }),
+      );
+
+      // surface_error on overloaded with no fallback throws FailoverError.
+      expect(outcome.action).toBe("throw");
+    });
+
+    it("propagates external abort during the backoff sleep", async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const promise = handleAssistantFailover(
+        makeParams({
+          initialDecision: { action: "surface_error", reason: "rate_limit" },
+          failoverReason: "rate_limit",
+          billingFailure: false,
+          rateLimitFailure: true,
+          rateLimitSameModelRetries: 0,
+          abortSignal: controller.signal,
+        }),
+      );
+      // Attach the rejection handler before aborting so the runner's rejection
+      // never gets a chance to be observed as unhandled.
+      const captured = promise.catch((err: unknown) => err);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(5_000);
+      const err = (await captured) as Error;
+      expect(err.name).toBe("AbortError");
     });
   });
 });

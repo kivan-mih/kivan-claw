@@ -1,7 +1,9 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 
 export const CHARS_PER_TOKEN_ESTIMATE = 4;
-export const TOOL_RESULT_CHARS_PER_TOKEN_ESTIMATE = 2;
+
+// set to 4 so that tool outputs count the same as normal text for tokens otherwise it was 2 more, which did not seem reasonable
+export const TOOL_RESULT_CHARS_PER_TOKEN_ESTIMATE = 3;
 const IMAGE_CHAR_ESTIMATE = 8_000;
 
 export type MessageCharEstimateCache = WeakMap<AgentMessage, number>;

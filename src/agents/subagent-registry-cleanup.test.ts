@@ -85,4 +85,82 @@ describe("resolveDeferredCleanupDecision", () => {
 
     expect(decision).toEqual({ kind: "retry", retryCount: 2, resumeDelayMs: 2_000 });
   });
+
+  it("honors a cooldown retry hint and does not advance the retry counter", () => {
+    // Completion-message flow, hint says wait 120s for provider cooldown.
+    const decision = resolveDecision({
+      entry: makeEntry({
+        expectsCompletionMessage: true,
+        announceRetryCount: 2,
+        lastAnnounceRetryHintMs: 120_000,
+      }),
+      activeDescendantRuns: 0,
+      resolveAnnounceRetryDelayMs: (retryCount) => retryCount * 1_000,
+    });
+
+    // retryCount must stay at 2 (no increment) so the loop doesn't give up
+    // after 3 fast 1/2/4s attempts during a multi-minute cooldown.
+    expect(decision).toEqual({
+      kind: "retry",
+      retryCount: 2,
+      resumeDelayMs: 120_000,
+    });
+  });
+
+  it("caps the cooldown hint at the hard-expiry budget remaining", () => {
+    // Hard expiry is 30 * 60_000 = 1_800_000 ms. endedAt set so that only
+    // 60_000 ms remain in the budget. A 120_000 ms hint must be capped.
+    const decision = resolveDecision({
+      entry: makeEntry({
+        expectsCompletionMessage: true,
+        announceRetryCount: 1,
+        lastAnnounceRetryHintMs: 120_000,
+        endedAt: now - (30 * 60_000 - 60_000),
+      }),
+      activeDescendantRuns: 0,
+      resolveAnnounceRetryDelayMs: () => 1_000,
+    });
+
+    expect(decision.kind).toBe("retry");
+    if (decision.kind === "retry") {
+      expect(decision.retryCount).toBe(1);
+      expect(decision.resumeDelayMs).toBe(60_000);
+    }
+  });
+
+  it("ignores the cooldown hint once the hard expiry budget is exhausted", () => {
+    // Past hard expiry: the hint branch must yield to the standard
+    // give-up/expiry path so the loop terminates.
+    const decision = resolveDecision({
+      entry: makeEntry({
+        expectsCompletionMessage: true,
+        announceRetryCount: 1,
+        lastAnnounceRetryHintMs: 120_000,
+        endedAt: now - (30 * 60_000 + 1),
+      }),
+      activeDescendantRuns: 0,
+    });
+
+    expect(decision.kind).toBe("give-up");
+  });
+
+  it("uses the normal backoff if the cooldown hint is shorter than the backoff floor", () => {
+    // Hint of 500ms must not under-cut the exponential backoff: the resume
+    // delay should be max(backoff, hint), not min.
+    const decision = resolveDecision({
+      entry: makeEntry({
+        expectsCompletionMessage: true,
+        announceRetryCount: 1,
+        lastAnnounceRetryHintMs: 500,
+      }),
+      activeDescendantRuns: 0,
+      resolveAnnounceRetryDelayMs: () => 2_000,
+    });
+
+    expect(decision).toEqual({
+      kind: "retry",
+      retryCount: 1,
+      resumeDelayMs: 2_000,
+    });
+  });
 });

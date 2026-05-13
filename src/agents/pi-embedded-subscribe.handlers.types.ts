@@ -75,6 +75,17 @@ export type EmbeddedPiSubscribeState = {
   assistantUsageCommitted: boolean;
 
   compactionInFlight: boolean;
+  /**
+   * True when the embedded runner has decided that the current turn ended with
+   * a recoverable overflow and is about to run compaction + retry. Set by
+   * `pi-embedded-runner/run.ts` at the start of its overflow-recovery branch,
+   * cleared on successful retry re-entry or on final-failure after
+   * `MAX_OVERFLOW_COMPACTION_ATTEMPTS`. Read by `handleAgentEnd` to suppress
+   * the parent-facing `phase: "error"` lifecycle emission for the synthetic
+   * tool-loop overflow error so a subagent's compaction is not misread by the
+   * requester as a terminal failure.
+   */
+  pendingOverflowRecovery: boolean;
   lastCompactionTokensAfter?: number;
   pendingCompactionRetry: number;
   compactionRetryResolve?: () => void;

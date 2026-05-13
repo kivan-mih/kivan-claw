@@ -1,6 +1,12 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
-import { resolveFinalAssistantRawText, resolveFinalAssistantVisibleText } from "./helpers.js";
+import {
+  resolveFinalAssistantRawText,
+  resolveFinalAssistantVisibleText,
+  resolveMaxRateLimitSameModelRetries,
+  resolveMaxSameModelIdleTimeoutRetries,
+  resolveSameModelRetryBackoffMs,
+} from "./helpers.js";
 
 function makeAssistantMessage(
   content: AssistantMessage["content"],
@@ -71,5 +77,46 @@ describe("resolveFinalAssistantVisibleText", () => {
     ]);
 
     expect(resolveFinalAssistantRawText(lastAssistant)).toBe("<final>keep this</final>");
+  });
+});
+
+describe("resolveSameModelRetryBackoffMs", () => {
+  it("returns 5s for the first attempt", () => {
+    expect(resolveSameModelRetryBackoffMs(1)).toBe(5_000);
+  });
+
+  it("doubles each attempt until the cap", () => {
+    expect(resolveSameModelRetryBackoffMs(2)).toBe(10_000);
+    expect(resolveSameModelRetryBackoffMs(3)).toBe(20_000);
+    expect(resolveSameModelRetryBackoffMs(4)).toBe(40_000);
+    expect(resolveSameModelRetryBackoffMs(5)).toBe(80_000);
+    expect(resolveSameModelRetryBackoffMs(6)).toBe(160_000);
+  });
+
+  it("caps at 5 minutes (300_000 ms) on the 7th attempt", () => {
+    expect(resolveSameModelRetryBackoffMs(7)).toBe(300_000);
+  });
+
+  it("stays at the cap for attempts beyond the budget", () => {
+    expect(resolveSameModelRetryBackoffMs(8)).toBe(300_000);
+    expect(resolveSameModelRetryBackoffMs(20)).toBe(300_000);
+  });
+
+  it("clamps non-positive or fractional attempts to the first-attempt delay", () => {
+    expect(resolveSameModelRetryBackoffMs(0)).toBe(5_000);
+    expect(resolveSameModelRetryBackoffMs(-1)).toBe(5_000);
+    expect(resolveSameModelRetryBackoffMs(1.6)).toBe(5_000);
+  });
+});
+
+describe("resolveMaxRateLimitSameModelRetries", () => {
+  it("is 7 (matches the cap-bound 7th retry sequence)", () => {
+    expect(resolveMaxRateLimitSameModelRetries()).toBe(7);
+  });
+});
+
+describe("resolveMaxSameModelIdleTimeoutRetries", () => {
+  it("is 7 (matches the cap-bound 7th retry sequence, shared with rate-limit)", () => {
+    expect(resolveMaxSameModelIdleTimeoutRetries()).toBe(7);
   });
 });
