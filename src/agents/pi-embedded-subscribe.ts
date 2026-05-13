@@ -159,6 +159,7 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
     pendingAssistantUsage: undefined,
     assistantUsageCommitted: false,
     compactionInFlight: false,
+    pendingOverflowRecovery: false,
     lastCompactionTokensAfter: undefined,
     pendingCompactionRetry: 0,
     compactionRetryResolve: undefined,
