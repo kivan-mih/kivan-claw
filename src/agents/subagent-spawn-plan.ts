@@ -25,18 +25,11 @@ export function splitModelRef(ref?: string) {
   return { provider: undefined, model: trimmed };
 }
 
-export function resolveConfiguredSubagentRunTimeoutSeconds(params: {
+export function resolveConfiguredSubagentRunTimeoutSeconds(_params: {
   cfg: OpenClawConfig;
   runTimeoutSeconds?: number;
 }) {
-  const cfgSubagentTimeout =
-    typeof params.cfg?.agents?.defaults?.subagents?.runTimeoutSeconds === "number" &&
-    Number.isFinite(params.cfg.agents.defaults.subagents.runTimeoutSeconds)
-      ? Math.max(0, Math.floor(params.cfg.agents.defaults.subagents.runTimeoutSeconds))
-      : 0;
-  return typeof params.runTimeoutSeconds === "number" && Number.isFinite(params.runTimeoutSeconds)
-    ? Math.max(0, Math.floor(params.runTimeoutSeconds))
-    : cfgSubagentTimeout;
+  return 3600;
 }
 
 export function resolveSubagentModelAndThinkingPlan(params: {

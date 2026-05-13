@@ -67,15 +67,8 @@ function protectJsonStdout(opts: Pick<AgentCliOpts, "json">): void {
   }
 }
 
-function parseTimeoutSeconds(opts: { cfg: OpenClawConfig; timeout?: string }) {
-  const raw =
-    opts.timeout !== undefined
-      ? Number.parseInt(opts.timeout, 10)
-      : (opts.cfg.agents?.defaults?.timeoutSeconds ?? 600);
-  if (Number.isNaN(raw) || raw < 0) {
-    throw new Error("--timeout must be a non-negative integer (seconds; 0 means no timeout)");
-  }
-  return raw;
+function parseTimeoutSeconds(_opts: { cfg: OpenClawConfig; timeout?: string }) {
+  return 3600;
 }
 
 function formatPayloadForLog(payload: {
