@@ -781,6 +781,11 @@ export async function runEmbeddedPiAgent(
       let emptyResponseRetryAttempts = 0;
       let compactionContinuationRetryAttempts = 0;
       let sameModelIdleTimeoutRetries = 0;
+      // Counts same-model retries triggered by HTTP 429 (rate_limit) when no
+      // fallback model is configured. Each retry waits resolveRateLimitRetryBackoffMs(N)
+      // before the next attempt; once the counter reaches the cap, the runner
+      // surfaces the error so the announce + lifecycle channels propagate it.
+      let rateLimitSameModelRetries = 0;
       // Cost-runaway breaker for #76293. State lives at the run-loop level
       // on purpose so it survives across attempt boundaries and across
       // profile/auth retries within this embedded run (a wrapper-local
@@ -2167,6 +2172,8 @@ export async function runEmbeddedPiAgent(
             isProbeSession,
             overloadProfileRotations,
             overloadProfileRotationLimit,
+            rateLimitSameModelRetries,
+            abortSignal: params.abortSignal,
             previousRetryFailoverReason: lastRetryFailoverReason,
             logAssistantFailoverDecision,
             warn: (message) => log.warn(message),
@@ -2177,11 +2184,18 @@ export async function runEmbeddedPiAgent(
           });
           overloadProfileRotations = assistantFailoverOutcome.overloadProfileRotations;
           if (assistantFailoverOutcome.action === "retry") {
+            // For same_model_rate_limit, the counter is advanced inside
+            // sameModelRateLimitRetry; the runner mirrors it here so the next
+            // gate evaluation reads the updated attempt count.
+            if (typeof assistantFailoverOutcome.rateLimitSameModelRetries === "number") {
+              rateLimitSameModelRetries = assistantFailoverOutcome.rateLimitSameModelRetries;
+            }
             traceAttempts.push({
               provider: activeErrorContext.provider,
               model: activeErrorContext.model,
               result:
                 assistantFailoverOutcome.retryKind === "same_model_idle_timeout" ||
+                assistantFailoverOutcome.retryKind === "same_model_rate_limit" ||
                 assistantFailoverReason === "timeout"
                   ? "timeout"
                   : "rotate_profile",

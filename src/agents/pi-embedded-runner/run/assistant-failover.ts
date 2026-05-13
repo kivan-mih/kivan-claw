@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import { sleepWithAbort } from "../../../infra/backoff.js";
 import { sanitizeForLog } from "../../../terminal/ansi.js";
 import type { AuthProfileFailureReason } from "../../auth-profiles.js";
 import { FailoverError, resolveFailoverStatus } from "../../failover-error.js";
@@ -14,6 +15,7 @@ import {
   resolveRunFailoverDecision,
   type AssistantFailoverDecision,
 } from "./failover-policy.js";
+import { resolveMaxRateLimitSameModelRetries, resolveRateLimitRetryBackoffMs } from "./helpers.js";
 
 type AssistantFailoverOutcome =
   | {
@@ -24,7 +26,8 @@ type AssistantFailoverOutcome =
       action: "retry";
       overloadProfileRotations: number;
       lastRetryFailoverReason: FailoverReason | null;
-      retryKind?: "same_model_idle_timeout";
+      retryKind?: "same_model_idle_timeout" | "same_model_rate_limit";
+      rateLimitSameModelRetries?: number;
     }
   | {
       action: "throw";
@@ -59,6 +62,8 @@ export async function handleAssistantFailover(params: {
   isProbeSession: boolean;
   overloadProfileRotations: number;
   overloadProfileRotationLimit: number;
+  rateLimitSameModelRetries: number;
+  abortSignal?: AbortSignal;
   previousRetryFailoverReason: FailoverReason | null;
   logAssistantFailoverDecision: (
     decision: "rotate_profile" | "fallback_model" | "surface_error",
@@ -80,6 +85,47 @@ export async function handleAssistantFailover(params: {
 }): Promise<AssistantFailoverOutcome> {
   let overloadProfileRotations = params.overloadProfileRotations;
   let decision = params.initialDecision;
+  // Same-model rate-limit retry: when a profile rotation has been tried (or
+  // is impossible) and no fallback model is configured, wait with exponential
+  // backoff (capped at RATE_LIMIT_RETRY_MAX_BACKOFF_MS) and retry the same
+  // model. Only after the cap has been reached and we still see 429 do we
+  // fall through to the surface_error path. Mirrors sameModelIdleTimeoutRetry
+  // but for the rate_limit signal, and adds an actual wait before retry.
+  const isRateLimitSameModelRetryEligible = (): boolean => {
+    return (
+      params.failoverReason === "rate_limit" &&
+      !params.fallbackConfigured &&
+      params.rateLimitSameModelRetries < resolveMaxRateLimitSameModelRetries()
+    );
+  };
+  const sameModelRateLimitRetry = async (): Promise<AssistantFailoverOutcome> => {
+    const nextAttempt = params.rateLimitSameModelRetries + 1;
+    const delayMs = resolveRateLimitRetryBackoffMs(nextAttempt);
+    params.warn(
+      `[rate-limit-backoff] ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} attempt=${nextAttempt}/${resolveMaxRateLimitSameModelRetries()} delayMs=${delayMs}`,
+    );
+    try {
+      await sleepWithAbort(delayMs, params.abortSignal);
+    } catch (err) {
+      if (params.abortSignal?.aborted) {
+        const abortErr = new Error("Operation aborted", { cause: err });
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+      throw err;
+    }
+    return {
+      action: "retry",
+      overloadProfileRotations,
+      retryKind: "same_model_rate_limit",
+      rateLimitSameModelRetries: nextAttempt,
+      lastRetryFailoverReason: mergeRetryFailoverReason({
+        previous: params.previousRetryFailoverReason,
+        failoverReason: params.failoverReason,
+        timedOut: false,
+      }),
+    };
+  };
   const sameModelIdleTimeoutRetry = (): AssistantFailoverOutcome => {
     params.warn(
       `[llm-idle-timeout] ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} produced no reply before the idle watchdog; retrying same model`,
@@ -165,6 +211,9 @@ export async function handleAssistantFailover(params: {
         }),
       };
     }
+    if (isRateLimitSameModelRetryEligible()) {
+      return await sameModelRateLimitRetry();
+    }
     if (params.idleTimedOut && params.allowSameModelIdleTimeoutRetry) {
       return sameModelIdleTimeoutRetry();
     }
@@ -204,6 +253,9 @@ export async function handleAssistantFailover(params: {
   }
 
   if (decision.action === "surface_error") {
+    if (!params.externalAbort && isRateLimitSameModelRetryEligible()) {
+      return await sameModelRateLimitRetry();
+    }
     if (!params.externalAbort && params.idleTimedOut && params.allowSameModelIdleTimeoutRetry) {
       return sameModelIdleTimeoutRetry();
     }

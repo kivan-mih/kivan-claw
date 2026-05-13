@@ -33,6 +33,16 @@ const DEFAULT_OVERLOAD_FAILOVER_BACKOFF_MS = 5_000;
 const DEFAULT_MAX_OVERLOAD_PROFILE_ROTATIONS = 1;
 const DEFAULT_MAX_RATE_LIMIT_PROFILE_ROTATIONS = 1;
 
+// Same-model exponential backoff parameters for HTTP 429 on a single profile
+// with no fallback configured. After profile rotation has been exhausted, the
+// runner waits this many milliseconds and retries the same model rather than
+// dying immediately. Sequence is 5/10/20/40/80/160/300 s; the 7th attempt is
+// the first cap-bound wait. After that, propagate surface_error so the
+// existing announce + lifecycle channels notify the parent.
+const RATE_LIMIT_RETRY_BASE_BACKOFF_MS = 5_000;
+const RATE_LIMIT_RETRY_MAX_BACKOFF_MS = 5 * 60_000;
+const MAX_RATE_LIMIT_SAME_MODEL_RETRIES = 7;
+
 export function resolveOverloadFailoverBackoffMs(cfg?: OpenClawConfig): number {
   return cfg?.auth?.cooldowns?.overloadedBackoffMs ?? DEFAULT_OVERLOAD_FAILOVER_BACKOFF_MS;
 }
@@ -45,6 +55,20 @@ export function resolveRateLimitProfileRotationLimit(cfg?: OpenClawConfig): numb
   return (
     cfg?.auth?.cooldowns?.rateLimitedProfileRotations ?? DEFAULT_MAX_RATE_LIMIT_PROFILE_ROTATIONS
   );
+}
+
+/**
+ * Backoff for the Nth (1-based) same-model rate-limit retry attempt.
+ * Doubles each attempt and caps at RATE_LIMIT_RETRY_MAX_BACKOFF_MS.
+ */
+export function resolveRateLimitRetryBackoffMs(attempt: number): number {
+  const safeAttempt = Math.max(1, Math.floor(attempt));
+  const exp = RATE_LIMIT_RETRY_BASE_BACKOFF_MS * 2 ** (safeAttempt - 1);
+  return Math.min(exp, RATE_LIMIT_RETRY_MAX_BACKOFF_MS);
+}
+
+export function resolveMaxRateLimitSameModelRetries(): number {
+  return MAX_RATE_LIMIT_SAME_MODEL_RETRIES;
 }
 
 const ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL";
