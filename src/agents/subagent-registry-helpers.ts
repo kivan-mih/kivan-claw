@@ -33,6 +33,10 @@ const MAX_ANNOUNCE_RETRY_DELAY_MS = 8_000;
 export const MAX_ANNOUNCE_RETRY_COUNT = 3;
 export const ANNOUNCE_EXPIRY_MS = 5 * 60_000;
 export const ANNOUNCE_COMPLETION_HARD_EXPIRY_MS = 30 * 60_000;
+// Polling cadence for the cleanup-defer-descendants loop. Kept separate from
+// MIN_ANNOUNCE_RETRY_DELAY_MS so raising it does not also affect the first
+// retry delay. 5s is a quiet poll without hurting wake latency in normal runs.
+export const DEFER_DESCENDANTS_DELAY_MS = 5_000;
 
 const FROZEN_RESULT_TEXT_MAX_BYTES = 100 * 1024;
 

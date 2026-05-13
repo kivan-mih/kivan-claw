@@ -27,9 +27,9 @@ import {
   ANNOUNCE_COMPLETION_HARD_EXPIRY_MS,
   ANNOUNCE_EXPIRY_MS,
   capFrozenResultText,
+  DEFER_DESCENDANTS_DELAY_MS,
   logAnnounceGiveUp,
   MAX_ANNOUNCE_RETRY_COUNT,
-  MIN_ANNOUNCE_RETRY_DELAY_MS,
   persistSubagentSessionTiming,
   resolveAnnounceRetryDelayMs,
   safeRemoveAttachmentsDir,
@@ -584,7 +584,7 @@ export function createSubagentRegistryLifecycleController(params: {
       announceExpiryMs: ANNOUNCE_EXPIRY_MS,
       announceCompletionHardExpiryMs: ANNOUNCE_COMPLETION_HARD_EXPIRY_MS,
       maxAnnounceRetryCount: MAX_ANNOUNCE_RETRY_COUNT,
-      deferDescendantDelayMs: MIN_ANNOUNCE_RETRY_DELAY_MS,
+      deferDescendantDelayMs: DEFER_DESCENDANTS_DELAY_MS,
       resolveAnnounceRetryDelayMs,
     });
 
@@ -736,16 +736,43 @@ export function createSubagentRegistryLifecycleController(params: {
         wakeOnDescendantSettle: pendingPayload.wakeOnDescendantSettle === true,
         onDeliveryResult: (delivery) => {
           if (delivery.delivered) {
+            let mutated = false;
             if (entry.lastAnnounceDeliveryError !== undefined) {
               entry.lastAnnounceDeliveryError = undefined;
+              mutated = true;
+            }
+            // Clear any prior cooldown retry hint on success.
+            if (entry.lastAnnounceRetryHintMs !== undefined) {
+              entry.lastAnnounceRetryHintMs = undefined;
+              mutated = true;
+            }
+            if (mutated) {
               params.persist();
             }
             latestDeliveryError = undefined;
             return;
           }
+          let mutated = false;
           latestDeliveryError = formatAnnounceDeliveryError(delivery);
           if (entry.lastAnnounceDeliveryError !== latestDeliveryError) {
             entry.lastAnnounceDeliveryError = latestDeliveryError;
+            mutated = true;
+          }
+          // Carry through the cooldown retry hint (if any) so the
+          // cleanup-decision tree can extend the next resume delay past the
+          // default 1/2/4s exponential backoff. See
+          // subagent-announce-delivery.ts:classifyDeliveryRetryAfterMs.
+          const retryAfterMs =
+            typeof delivery.retryAfterMs === "number" &&
+            Number.isFinite(delivery.retryAfterMs) &&
+            delivery.retryAfterMs > 0
+              ? delivery.retryAfterMs
+              : undefined;
+          if (entry.lastAnnounceRetryHintMs !== retryAfterMs) {
+            entry.lastAnnounceRetryHintMs = retryAfterMs;
+            mutated = true;
+          }
+          if (mutated) {
             params.persist();
           }
         },

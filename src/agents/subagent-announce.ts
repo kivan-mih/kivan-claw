@@ -249,6 +249,14 @@ export async function runSubagentAnnounceFlow(params: {
   onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
 }): Promise<boolean> {
   let didAnnounce = false;
+  // Gates the finally-block label patch. The label is already set at spawn time
+  // (acp-spawn.ts) so the patch here is a "patch after all writes complete"
+  // workaround from 3133c7c84e8. Skipping it on early-return paths is critical:
+  // when descendants are pending we re-enter this flow every ~1s via the
+  // cleanup-defer-descendants loop, and an unconditional patch turns into a
+  // hot loop of `sessions.patch INVALID_REQUEST: label already in use`
+  // whenever a stale session entry still holds the label.
+  let didAttemptDelivery = false;
   const expectsCompletionMessage = params.expectsCompletionMessage === true;
   const announceType = params.announceType ?? "subagent task";
   let shouldDeleteChildSession = params.cleanup === "delete";
@@ -344,6 +352,13 @@ export async function runSubagentAnnounceFlow(params: {
     } catch {
       // Best-effort only.
     }
+
+    // Past all early-return guards (embedded-run-didn't-settle at line 271,
+    // shouldIgnorePostCompletionAnnounce above, pendingChildDescendantRuns
+    // above). Anything past this point either takes the wake-after-descendants
+    // path (which writes to the parent transcript) or the main delivery path
+    // (which also writes). Both want the finally-block label patch to run.
+    didAttemptDelivery = true;
 
     const announceId = buildAnnounceIdFromChildRun({
       childSessionKey: params.childSessionKey,
@@ -576,8 +591,11 @@ export async function runSubagentAnnounceFlow(params: {
     defaultRuntime.error?.(`Subagent announce failed: ${String(err)}`);
     // Best-effort follow-ups; ignore failures to avoid breaking the caller response.
   } finally {
-    // Patch label after all writes complete
-    if (params.label) {
+    // Patch label after all writes complete. Guarded by didAttemptDelivery so
+    // early-return iterations (e.g. cleanup-defer-descendants polling at 1s)
+    // don't spam this against a stale session entry that still holds the
+    // label — see 3133c7c84e8 for the workaround's original intent.
+    if (params.label && didAttemptDelivery) {
       try {
         await subagentAnnounceDeps.callGateway({
           method: "sessions.patch",

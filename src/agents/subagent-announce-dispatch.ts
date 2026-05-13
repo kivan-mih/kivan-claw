@@ -13,6 +13,15 @@ export type SubagentAnnounceDeliveryResult = {
   path: SubagentDeliveryPath;
   error?: string;
   phases?: SubagentAnnounceDispatchPhaseResult[];
+  /**
+   * When set, a hint to the cleanup-retry scheduler about the minimum delay
+   * before the next announce attempt. Populated when delivery failed because
+   * the provider is in cooldown (rate-limit / 429) and we know roughly when
+   * the cooldown ends. The cleanup decision tree uses this to wait the
+   * cooldown out instead of exhausting the 1/2/4s exponential-backoff retry
+   * budget within ~7s and giving up.
+   */
+  retryAfterMs?: number;
 };
 
 type SubagentAnnounceDispatchPhase = "queue-primary" | "direct-primary" | "queue-fallback";

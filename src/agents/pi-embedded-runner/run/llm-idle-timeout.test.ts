@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
 import {
+  DEFAULT_LLM_FIRST_BYTE_TIMEOUT_MS,
   DEFAULT_LLM_IDLE_TIMEOUT_MS,
+  resolveLlmFirstByteTimeoutMs,
   resolveLlmIdleTimeoutMs,
   streamWithIdleTimeout,
 } from "./llm-idle-timeout.js";
@@ -17,7 +19,9 @@ describe("resolveLlmIdleTimeoutMs", () => {
   });
 
   it("caps agents.defaults.timeoutSeconds fallback at the default idle watchdog", () => {
-    const cfg = { agents: { defaults: { timeoutSeconds: 300 } } } as OpenClawConfig;
+    // Input must exceed DEFAULT_LLM_IDLE_TIMEOUT_MS (1200s after the
+    // 6733303a default bump) for the cap to actually trigger.
+    const cfg = { agents: { defaults: { timeoutSeconds: 3600 } } } as OpenClawConfig;
     expect(resolveLlmIdleTimeoutMs({ cfg })).toBe(DEFAULT_LLM_IDLE_TIMEOUT_MS);
   });
 
@@ -27,7 +31,8 @@ describe("resolveLlmIdleTimeoutMs", () => {
   });
 
   it("caps an explicit run timeout override at the default idle watchdog", () => {
-    expect(resolveLlmIdleTimeoutMs({ runTimeoutMs: 900_000 })).toBe(DEFAULT_LLM_IDLE_TIMEOUT_MS);
+    // Input must exceed DEFAULT_LLM_IDLE_TIMEOUT_MS for the cap to trigger.
+    expect(resolveLlmIdleTimeoutMs({ runTimeoutMs: 3_600_000 })).toBe(DEFAULT_LLM_IDLE_TIMEOUT_MS);
   });
 
   it("uses an explicit run timeout override when shorter than the default idle watchdog", () => {
@@ -86,7 +91,8 @@ describe("resolveLlmIdleTimeoutMs", () => {
   });
 
   it("caps agents.defaults.timeoutSeconds for cron before disabling the default idle timeout", () => {
-    const cfg = { agents: { defaults: { timeoutSeconds: 300 } } } as OpenClawConfig;
+    // Input must exceed DEFAULT_LLM_IDLE_TIMEOUT_MS for the cap to trigger.
+    const cfg = { agents: { defaults: { timeoutSeconds: 3600 } } } as OpenClawConfig;
     expect(resolveLlmIdleTimeoutMs({ cfg, trigger: "cron" })).toBe(DEFAULT_LLM_IDLE_TIMEOUT_MS);
   });
 
@@ -370,5 +376,149 @@ describe("streamWithIdleTimeout", () => {
     const [timeoutError] = onIdleTimeout.mock.calls[0] ?? [];
     expect(timeoutError).toBeInstanceOf(Error);
     expect((timeoutError as Error).message).toMatch(/LLM idle timeout/);
+  });
+
+  it("fires the first-byte timer (not the idle timer) when the stream is silent before any chunk", async () => {
+    vi.useFakeTimers();
+    const slowStream = createNeverYieldingStream();
+    const baseFn = vi.fn().mockReturnValue(slowStream);
+    // Idle timeout 60s; first-byte timeout 50ms. A silent provider must abort
+    // at ~50ms, not wait the full 60s.
+    const wrapped = streamWithIdleTimeout(baseFn, 60_000, undefined, {
+      firstByteTimeoutMs: 50,
+    });
+
+    const model = {} as Parameters<typeof baseFn>[0];
+    const context = {} as Parameters<typeof baseFn>[1];
+    const options = {} as Parameters<typeof baseFn>[2];
+
+    const stream = wrapped(model, context, options) as AsyncIterable<unknown>;
+    const iterator = stream[Symbol.asyncIterator]();
+    const next = iterator.next().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(50);
+    const error = await next;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/LLM no-first-byte timeout/);
+  });
+
+  it("switches from first-byte budget to idle budget after the first chunk arrives", async () => {
+    vi.useFakeTimers();
+    let yielded = false;
+    const oneChunkThenSilent: AsyncIterable<{ text: string }> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            if (!yielded) {
+              yielded = true;
+              return { done: false, value: { text: "hello" } };
+            }
+            return new Promise<IteratorResult<{ text: string }>>(() => {});
+          },
+        };
+      },
+    };
+    const baseFn = vi.fn().mockReturnValue(oneChunkThenSilent);
+    // 50ms first-byte, 1s idle. Once the first chunk arrives, the next() call
+    // must NOT trip the 50ms budget — it should use the 1s idle budget.
+    const wrapped = streamWithIdleTimeout(baseFn, 1_000, undefined, {
+      firstByteTimeoutMs: 50,
+    });
+
+    const model = {} as Parameters<typeof baseFn>[0];
+    const context = {} as Parameters<typeof baseFn>[1];
+    const options = {} as Parameters<typeof baseFn>[2];
+
+    const stream = wrapped(model, context, options) as AsyncIterable<{ text: string }>;
+    const iterator = stream[Symbol.asyncIterator]();
+
+    // First chunk arrives without any timer advance.
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    expect(first.value).toEqual({ text: "hello" });
+
+    // Now the stream is silent. Advance past the (smaller) first-byte budget;
+    // the next() must still be pending because the larger idle budget is in
+    // effect post-first-chunk.
+    const second = iterator.next().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(100); // > firstByteTimeoutMs, < timeoutMs
+    let raced: unknown = "pending";
+    await Promise.race([
+      second.then((value) => {
+        raced = value;
+      }),
+      Promise.resolve(),
+    ]);
+    expect(raced).toBe("pending");
+
+    // Advance to the idle-timer cap; now it must fire as a regular idle
+    // timeout, not a no-first-byte timeout.
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await second;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/LLM idle timeout/);
+    expect((error as Error).message).not.toMatch(/no-first-byte/);
+  });
+
+  it("preserves legacy single-timer behavior when firstByteTimeoutMs is omitted", async () => {
+    vi.useFakeTimers();
+    const slowStream = createNeverYieldingStream();
+    const baseFn = vi.fn().mockReturnValue(slowStream);
+    const wrapped = streamWithIdleTimeout(baseFn, 80); // no options
+    const stream = wrapped(
+      {} as Parameters<typeof baseFn>[0],
+      {} as Parameters<typeof baseFn>[1],
+      {} as Parameters<typeof baseFn>[2],
+    ) as AsyncIterable<unknown>;
+    const iterator = stream[Symbol.asyncIterator]();
+    const next = iterator.next().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(80);
+    const error = await next;
+    expect(error).toBeInstanceOf(Error);
+    // Without the options, the legacy "LLM idle timeout" message is preserved
+    // (not the new "no-first-byte" variant).
+    expect((error as Error).message).toMatch(/LLM idle timeout/);
+    expect((error as Error).message).not.toMatch(/no-first-byte/);
+  });
+});
+
+describe("resolveLlmFirstByteTimeoutMs", () => {
+  it("returns the default first-byte budget when no params are provided", () => {
+    expect(resolveLlmFirstByteTimeoutMs()).toBe(DEFAULT_LLM_FIRST_BYTE_TIMEOUT_MS);
+  });
+
+  it("returns 0 for cron-triggered runs (cron opts out of network-silence guards)", () => {
+    expect(resolveLlmFirstByteTimeoutMs({ trigger: "cron" })).toBe(0);
+  });
+
+  it.each([
+    "http://localhost:11434",
+    "http://127.0.0.1:11434",
+    "http://10.0.0.1:11434",
+    "http://my-rig.local:11434",
+    "http://[::1]:11434",
+  ])("returns 0 for local provider base URL %s", (baseUrl) => {
+    expect(resolveLlmFirstByteTimeoutMs({ model: { baseUrl } })).toBe(0);
+  });
+
+  it("caps by an explicit modelRequestTimeoutMs when shorter than the default", () => {
+    expect(resolveLlmFirstByteTimeoutMs({ modelRequestTimeoutMs: 30_000 })).toBe(30_000);
+  });
+
+  it("caps by runTimeoutMs when shorter than the default", () => {
+    expect(resolveLlmFirstByteTimeoutMs({ runTimeoutMs: 30_000 })).toBe(30_000);
+  });
+
+  it("caps by agents.defaults.timeoutSeconds when shorter than the default", () => {
+    const cfg = { agents: { defaults: { timeoutSeconds: 45 } } } as OpenClawConfig;
+    expect(resolveLlmFirstByteTimeoutMs({ cfg })).toBe(45_000);
+  });
+
+  it("does not exceed the default first-byte budget when bounds are wider", () => {
+    expect(
+      resolveLlmFirstByteTimeoutMs({
+        runTimeoutMs: 3_600_000,
+        modelRequestTimeoutMs: 3_600_000,
+      }),
+    ).toBe(DEFAULT_LLM_FIRST_BYTE_TIMEOUT_MS);
   });
 });
