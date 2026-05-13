@@ -39,21 +39,6 @@ RUN --mount=type=bind,source=${OPENCLAW_BUNDLED_PLUGIN_DIR},target=/tmp/${OPENCL
       fi; \
     done
 
-# Install Go
-RUN curl -sL -o /tmp/go.tar.gz https://go.dev/dl/go1.23.6.linux-amd64.tar.gz \
- && echo "9379441ea310de000f33a4dc767bd966e72ab2826270e038e78b2c53c2e7802d  /tmp/go.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/go.tar.gz -C /usr/local \
- && rm -f /tmp/go.tar.gz
-ENV PATH="/usr/local/go/bin:$PATH"
-
-# Install JDK 21 (Eclipse Temurin)
-RUN curl -sL -o /tmp/jdk21.tar.gz https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_linux_hotspot_21.0.11_10.tar.gz \
- && echo "4b2220e232a97997b436ca6ab15cbf70171ecff52958a46159dfa5a8c44ca4de  /tmp/jdk21.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/jdk21.tar.gz -C /usr/local \
- && rm -f /tmp/jdk21.tar.gz
-ENV JAVA_HOME="/usr/local/jdk-21.0.11+10"
-ENV PATH="$JAVA_HOME/bin:$PATH"
-
 # ── Stage 2: Build ──────────────────────────────────────────────
 FROM ${OPENCLAW_BUN_IMAGE} AS bun-binary
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
@@ -174,8 +159,24 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
     --mount=type=cache,id=openclaw-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates procps hostname curl git lsof openssl python3 socat && \
+      ca-certificates procps hostname curl git lsof openssl python3 socat maven && \
     update-ca-certificates
+
+# Install Go (pinned tarball; apt's golang is too old for some toolchains).
+RUN curl -sL -o /tmp/go.tar.gz https://go.dev/dl/go1.23.6.linux-amd64.tar.gz \
+ && echo "9379441ea310de000f33a4dc767bd966e72ab2826270e038e78b2c53c2e7802d  /tmp/go.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/go.tar.gz -C /usr/local \
+ && rm -f /tmp/go.tar.gz
+
+# Install JDK 21 (Eclipse Temurin). Maven (apt) pulls a default JRE that we
+# shadow via JAVA_HOME so `mvn` runs on Temurin 21.
+RUN curl -sL -o /tmp/jdk21.tar.gz https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_linux_hotspot_21.0.11_10.tar.gz \
+ && echo "4b2220e232a97997b436ca6ab15cbf70171ecff52958a46159dfa5a8c44ca4de  /tmp/jdk21.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/jdk21.tar.gz -C /usr/local \
+ && rm -f /tmp/jdk21.tar.gz
+
+ENV JAVA_HOME="/usr/local/jdk-21.0.11+10"
+ENV PATH="$JAVA_HOME/bin:/usr/local/go/bin:$PATH"
 
 RUN chown node:node /app
 
