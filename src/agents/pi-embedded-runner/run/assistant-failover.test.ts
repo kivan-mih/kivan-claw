@@ -37,6 +37,7 @@ function makeParams(overrides: Partial<Params> = {}): Params {
     overloadProfileRotations: 0,
     overloadProfileRotationLimit: 3,
     rateLimitSameModelRetries: 0,
+    sameModelIdleTimeoutRetries: 0,
     abortSignal: undefined,
     previousRetryFailoverReason: null,
     logAssistantFailoverDecision: vi.fn(),
@@ -197,22 +198,32 @@ describe("handleAssistantFailover", () => {
     });
 
     it("retries the same model when an idle-timeout retry is allowed", async () => {
-      const outcome = await handleAssistantFailover(
-        makeParams({
-          initialDecision: { action: "surface_error", reason: null },
-          failoverReason: null,
-          timedOut: true,
-          idleTimedOut: true,
-          allowSameModelIdleTimeoutRetry: true,
-          billingFailure: false,
-        }),
-      );
+      vi.useFakeTimers();
+      try {
+        const outcomePromise = handleAssistantFailover(
+          makeParams({
+            initialDecision: { action: "surface_error", reason: null },
+            failoverReason: null,
+            timedOut: true,
+            idleTimedOut: true,
+            allowSameModelIdleTimeoutRetry: true,
+            billingFailure: false,
+          }),
+        );
 
-      expect(outcome.action).toBe("retry");
-      if (outcome.action !== "retry") {
-        return;
+        // First attempt's backoff is 5 s (mirrors the rate-limit base delay).
+        await vi.advanceTimersByTimeAsync(5_000);
+        const outcome = await outcomePromise;
+
+        expect(outcome.action).toBe("retry");
+        if (outcome.action !== "retry") {
+          return;
+        }
+        expect(outcome.retryKind).toBe("same_model_idle_timeout");
+        expect(outcome.sameModelIdleTimeoutRetries).toBe(1);
+      } finally {
+        vi.useRealTimers();
       }
-      expect(outcome.retryKind).toBe("same_model_idle_timeout");
     });
   });
 

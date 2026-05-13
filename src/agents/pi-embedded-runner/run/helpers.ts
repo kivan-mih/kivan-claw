@@ -33,15 +33,18 @@ const DEFAULT_OVERLOAD_FAILOVER_BACKOFF_MS = 5_000;
 const DEFAULT_MAX_OVERLOAD_PROFILE_ROTATIONS = 1;
 const DEFAULT_MAX_RATE_LIMIT_PROFILE_ROTATIONS = 1;
 
-// Same-model exponential backoff parameters for HTTP 429 on a single profile
-// with no fallback configured. After profile rotation has been exhausted, the
-// runner waits this many milliseconds and retries the same model rather than
-// dying immediately. Sequence is 5/10/20/40/80/160/300 s; the 7th attempt is
-// the first cap-bound wait. After that, propagate surface_error so the
-// existing announce + lifecycle channels notify the parent.
-const RATE_LIMIT_RETRY_BASE_BACKOFF_MS = 5_000;
-const RATE_LIMIT_RETRY_MAX_BACKOFF_MS = 5 * 60_000;
+// Exponential backoff parameters for same-model retries on transient
+// provider failures (HTTP 429 rate_limit and idle-timeout) when no fallback
+// model is configured. The runner waits this many milliseconds before
+// re-issuing the same model_call instead of dying immediately. Sequence is
+// 5/10/20/40/80/160/300 s; the 7th attempt is the first cap-bound wait.
+// After that, propagate surface_error so the announce + lifecycle channels
+// notify the parent. Both signals (rate_limit, idle_timeout) reuse this
+// sequence under their own per-run counters.
+const SAME_MODEL_RETRY_BASE_BACKOFF_MS = 5_000;
+const SAME_MODEL_RETRY_MAX_BACKOFF_MS = 5 * 60_000;
 const MAX_RATE_LIMIT_SAME_MODEL_RETRIES = 7;
+const MAX_SAME_MODEL_IDLE_TIMEOUT_RETRIES = 7;
 
 export function resolveOverloadFailoverBackoffMs(cfg?: OpenClawConfig): number {
   return cfg?.auth?.cooldowns?.overloadedBackoffMs ?? DEFAULT_OVERLOAD_FAILOVER_BACKOFF_MS;
@@ -58,17 +61,22 @@ export function resolveRateLimitProfileRotationLimit(cfg?: OpenClawConfig): numb
 }
 
 /**
- * Backoff for the Nth (1-based) same-model rate-limit retry attempt.
- * Doubles each attempt and caps at RATE_LIMIT_RETRY_MAX_BACKOFF_MS.
+ * Backoff for the Nth (1-based) same-model retry attempt — used by both the
+ * rate-limit and idle-timeout retry paths. Doubles each attempt and caps at
+ * SAME_MODEL_RETRY_MAX_BACKOFF_MS.
  */
-export function resolveRateLimitRetryBackoffMs(attempt: number): number {
+export function resolveSameModelRetryBackoffMs(attempt: number): number {
   const safeAttempt = Math.max(1, Math.floor(attempt));
-  const exp = RATE_LIMIT_RETRY_BASE_BACKOFF_MS * 2 ** (safeAttempt - 1);
-  return Math.min(exp, RATE_LIMIT_RETRY_MAX_BACKOFF_MS);
+  const exp = SAME_MODEL_RETRY_BASE_BACKOFF_MS * 2 ** (safeAttempt - 1);
+  return Math.min(exp, SAME_MODEL_RETRY_MAX_BACKOFF_MS);
 }
 
 export function resolveMaxRateLimitSameModelRetries(): number {
   return MAX_RATE_LIMIT_SAME_MODEL_RETRIES;
+}
+
+export function resolveMaxSameModelIdleTimeoutRetries(): number {
+  return MAX_SAME_MODEL_IDLE_TIMEOUT_RETRIES;
 }
 
 const ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL";

@@ -15,7 +15,11 @@ import {
   resolveRunFailoverDecision,
   type AssistantFailoverDecision,
 } from "./failover-policy.js";
-import { resolveMaxRateLimitSameModelRetries, resolveRateLimitRetryBackoffMs } from "./helpers.js";
+import {
+  resolveMaxRateLimitSameModelRetries,
+  resolveMaxSameModelIdleTimeoutRetries,
+  resolveSameModelRetryBackoffMs,
+} from "./helpers.js";
 
 type AssistantFailoverOutcome =
   | {
@@ -28,6 +32,7 @@ type AssistantFailoverOutcome =
       lastRetryFailoverReason: FailoverReason | null;
       retryKind?: "same_model_idle_timeout" | "same_model_rate_limit";
       rateLimitSameModelRetries?: number;
+      sameModelIdleTimeoutRetries?: number;
     }
   | {
       action: "throw";
@@ -63,6 +68,7 @@ export async function handleAssistantFailover(params: {
   overloadProfileRotations: number;
   overloadProfileRotationLimit: number;
   rateLimitSameModelRetries: number;
+  sameModelIdleTimeoutRetries: number;
   abortSignal?: AbortSignal;
   previousRetryFailoverReason: FailoverReason | null;
   logAssistantFailoverDecision: (
@@ -100,7 +106,7 @@ export async function handleAssistantFailover(params: {
   };
   const sameModelRateLimitRetry = async (): Promise<AssistantFailoverOutcome> => {
     const nextAttempt = params.rateLimitSameModelRetries + 1;
-    const delayMs = resolveRateLimitRetryBackoffMs(nextAttempt);
+    const delayMs = resolveSameModelRetryBackoffMs(nextAttempt);
     params.warn(
       `[rate-limit-backoff] ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} attempt=${nextAttempt}/${resolveMaxRateLimitSameModelRetries()} delayMs=${delayMs}`,
     );
@@ -126,14 +132,33 @@ export async function handleAssistantFailover(params: {
       }),
     };
   };
-  const sameModelIdleTimeoutRetry = (): AssistantFailoverOutcome => {
+  // Same-model idle-timeout retry: when the runner's stream watchdog fires
+  // (no chunk within the idle/first-byte budget) and no fallback is configured,
+  // wait with the same exponential backoff sequence the rate-limit path uses
+  // and re-issue the model_call. The runner's `allowSameModelIdleTimeoutRetry`
+  // check is the gate (budget + non-compaction + no-fallback); this helper
+  // is only invoked when that gate passes.
+  const sameModelIdleTimeoutRetry = async (): Promise<AssistantFailoverOutcome> => {
+    const nextAttempt = params.sameModelIdleTimeoutRetries + 1;
+    const delayMs = resolveSameModelRetryBackoffMs(nextAttempt);
     params.warn(
-      `[llm-idle-timeout] ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} produced no reply before the idle watchdog; retrying same model`,
+      `[llm-idle-timeout] ${sanitizeForLog(params.provider)}/${sanitizeForLog(params.modelId)} produced no reply before the idle watchdog; retrying same model attempt=${nextAttempt}/${resolveMaxSameModelIdleTimeoutRetries()} delayMs=${delayMs}`,
     );
+    try {
+      await sleepWithAbort(delayMs, params.abortSignal);
+    } catch (err) {
+      if (params.abortSignal?.aborted) {
+        const abortErr = new Error("Operation aborted", { cause: err });
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+      throw err;
+    }
     return {
       action: "retry",
       overloadProfileRotations,
       retryKind: "same_model_idle_timeout",
+      sameModelIdleTimeoutRetries: nextAttempt,
       lastRetryFailoverReason: mergeRetryFailoverReason({
         previous: params.previousRetryFailoverReason,
         failoverReason: params.failoverReason,
@@ -215,7 +240,7 @@ export async function handleAssistantFailover(params: {
       return await sameModelRateLimitRetry();
     }
     if (params.idleTimedOut && params.allowSameModelIdleTimeoutRetry) {
-      return sameModelIdleTimeoutRetry();
+      return await sameModelIdleTimeoutRetry();
     }
 
     decision = resolveRunFailoverDecision({
@@ -257,7 +282,7 @@ export async function handleAssistantFailover(params: {
       return await sameModelRateLimitRetry();
     }
     if (!params.externalAbort && params.idleTimedOut && params.allowSameModelIdleTimeoutRetry) {
-      return sameModelIdleTimeoutRetry();
+      return await sameModelIdleTimeoutRetry();
     }
     params.logAssistantFailoverDecision("surface_error");
     // Two surface_error shapes already have downstream synthesis and
