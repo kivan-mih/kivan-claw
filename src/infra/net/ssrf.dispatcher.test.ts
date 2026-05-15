@@ -349,4 +349,49 @@ describe("createPinnedDispatcher", () => {
       headersTimeout: 654_321,
     });
   });
+
+  it("applies distinct headers/body/connect timeouts when given a spec object", () => {
+    const lookup = vi.fn() as unknown as PinnedHostname["lookup"];
+    const pinned: PinnedHostname = {
+      hostname: "api.z.ai",
+      addresses: ["198.51.100.10"],
+      lookup,
+    };
+
+    createPinnedDispatcher(pinned, undefined, undefined, {
+      headersTimeoutMs: 30_000,
+      bodyTimeoutMs: 120_000,
+      connectTimeoutMs: 10_000,
+    });
+
+    expect(agentCtor).toHaveBeenCalledWith({
+      connect: {
+        lookup,
+        autoSelectFamily: true,
+        autoSelectFamilyAttemptTimeout: 300,
+        timeout: 10_000,
+      },
+      allowH2: false,
+      bodyTimeout: 120_000,
+      headersTimeout: 30_000,
+    });
+  });
+
+  it("omits a timeout dimension when not supplied in the spec object", () => {
+    const lookup = vi.fn() as unknown as PinnedHostname["lookup"];
+    const pinned: PinnedHostname = {
+      hostname: "api.z.ai",
+      addresses: ["198.51.100.10"],
+      lookup,
+    };
+
+    createPinnedDispatcher(pinned, undefined, undefined, {
+      headersTimeoutMs: 30_000,
+    });
+
+    const options = agentCtor.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(options.headersTimeout).toBe(30_000);
+    expect(options.bodyTimeout).toBeUndefined();
+    expect((options.connect as Record<string, unknown> | undefined)?.timeout).toBeUndefined();
+  });
 });

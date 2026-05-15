@@ -1,5 +1,9 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
 import {
+  DEFAULT_LLM_BODY_TIMEOUT_SECONDS,
+  DEFAULT_LLM_HEADERS_TIMEOUT_SECONDS,
+} from "../config/agent-timeout-defaults.js";
+import {
   fetchWithSsrFGuard,
   withTrustedEnvProxyGuardedFetchMode,
 } from "../infra/net/fetch-guard.js";
@@ -9,12 +13,34 @@ import {
   type SsrFPolicy,
 } from "../infra/net/ssrf.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
+import { isLocalProviderBaseUrl } from "./pi-embedded-runner/run/llm-idle-timeout.js";
 import {
   buildProviderRequestDispatcherPolicy,
   getModelProviderRequestTransport,
   mergeModelProviderRequestOverrides,
   resolveProviderRequestPolicyConfig,
 } from "./provider-request-config.js";
+
+const DEFAULT_LLM_HEADERS_TIMEOUT_MS = DEFAULT_LLM_HEADERS_TIMEOUT_SECONDS * 1000;
+const DEFAULT_LLM_BODY_TIMEOUT_MS = DEFAULT_LLM_BODY_TIMEOUT_SECONDS * 1000;
+
+function resolveLlmDispatcherTimeouts(model: Model<Api>): {
+  headersTimeoutMs?: number;
+  bodyTimeoutMs?: number;
+} {
+  // Local providers (Ollama / LM Studio / loopback) legitimately stay silent
+  // for many minutes during prompt evaluation. The TCP-layer caps would abort
+  // valid local runs, so skip both. The application-level watchdog already
+  // exempts the same hosts via `isLocalProviderBaseUrl`.
+  const baseUrl = (model as { baseUrl?: unknown }).baseUrl;
+  if (typeof baseUrl === "string" && baseUrl.length > 0 && isLocalProviderBaseUrl(baseUrl)) {
+    return {};
+  }
+  return {
+    headersTimeoutMs: DEFAULT_LLM_HEADERS_TIMEOUT_MS,
+    bodyTimeoutMs: DEFAULT_LLM_BODY_TIMEOUT_MS,
+  };
+}
 
 const DEFAULT_MAX_SDK_RETRY_WAIT_SECONDS = 60;
 
@@ -318,6 +344,7 @@ export function buildGuardedModelFetch(model: Model<Api>, timeoutMs?: number): t
   const requestConfig = resolveModelRequestPolicy(model);
   const dispatcherPolicy = buildProviderRequestDispatcherPolicy(requestConfig);
   const requestTimeoutMs = resolveModelRequestTimeoutMs(model, timeoutMs);
+  const llmDispatcherTimeouts = resolveLlmDispatcherTimeouts(model);
   return async (input, init) => {
     const request = input instanceof Request ? new Request(input, init) : undefined;
     const url =
@@ -356,6 +383,7 @@ export function buildGuardedModelFetch(model: Model<Api>, timeoutMs?: number): t
       },
       dispatcherPolicy,
       timeoutMs: requestTimeoutMs,
+      ...llmDispatcherTimeouts,
       // Provider transport intentionally keeps the secure default and never
       // replays unsafe request bodies across cross-origin redirects.
       allowCrossOriginUnsafeRedirectReplay: false,

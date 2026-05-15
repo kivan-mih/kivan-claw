@@ -67,9 +67,60 @@ export function loadUndiciRuntimeDeps(): UndiciRuntimeDeps {
   };
 }
 
+export type DispatcherTimeoutSpec = {
+  bodyTimeoutMs?: number;
+  headersTimeoutMs?: number;
+  connectTimeoutMs?: number;
+};
+
+function normalizeDispatcherTimeoutSpec(
+  spec: number | DispatcherTimeoutSpec | undefined,
+): DispatcherTimeoutSpec | undefined {
+  if (spec === undefined) {
+    return undefined;
+  }
+  if (typeof spec === "number") {
+    if (!Number.isFinite(spec) || spec <= 0) {
+      return undefined;
+    }
+    const value = Math.floor(spec);
+    return { bodyTimeoutMs: value, headersTimeoutMs: value, connectTimeoutMs: value };
+  }
+  const out: DispatcherTimeoutSpec = {};
+  if (
+    typeof spec.bodyTimeoutMs === "number" &&
+    Number.isFinite(spec.bodyTimeoutMs) &&
+    spec.bodyTimeoutMs > 0
+  ) {
+    out.bodyTimeoutMs = Math.floor(spec.bodyTimeoutMs);
+  }
+  if (
+    typeof spec.headersTimeoutMs === "number" &&
+    Number.isFinite(spec.headersTimeoutMs) &&
+    spec.headersTimeoutMs > 0
+  ) {
+    out.headersTimeoutMs = Math.floor(spec.headersTimeoutMs);
+  }
+  if (
+    typeof spec.connectTimeoutMs === "number" &&
+    Number.isFinite(spec.connectTimeoutMs) &&
+    spec.connectTimeoutMs > 0
+  ) {
+    out.connectTimeoutMs = Math.floor(spec.connectTimeoutMs);
+  }
+  if (
+    out.bodyTimeoutMs === undefined &&
+    out.headersTimeoutMs === undefined &&
+    out.connectTimeoutMs === undefined
+  ) {
+    return undefined;
+  }
+  return out;
+}
+
 function withHttp1OnlyDispatcherOptions<T extends object | undefined>(
   options?: T,
-  timeoutMs?: number,
+  timeout?: number | DispatcherTimeoutSpec,
   applyTo?: { connect?: boolean; proxyTls?: boolean },
 ): (T extends object ? T : Record<never, never>) & { allowH2: false } {
   const base = {} as (T extends object ? T : Record<never, never>) & { allowH2: false };
@@ -91,21 +142,28 @@ function withHttp1OnlyDispatcherOptions<T extends object | undefined>(
     applyMissingConnectOptions(proxyTls, autoSelectConnect);
     baseRecord.proxyTls = proxyTls;
   }
-  if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
-    const normalizedTimeoutMs = Math.floor(timeoutMs);
-    baseRecord.bodyTimeout = normalizedTimeoutMs;
-    baseRecord.headersTimeout = normalizedTimeoutMs;
-    if (targets.connect && typeof baseRecord.connect !== "function") {
-      baseRecord.connect = {
-        ...(isObjectRecord(baseRecord.connect) ? baseRecord.connect : {}),
-        timeout: normalizedTimeoutMs,
-      };
+  const normalized = normalizeDispatcherTimeoutSpec(timeout);
+  if (normalized) {
+    if (normalized.bodyTimeoutMs !== undefined) {
+      baseRecord.bodyTimeout = normalized.bodyTimeoutMs;
     }
-    if (targets.proxyTls) {
-      baseRecord.proxyTls = {
-        ...(isObjectRecord(baseRecord.proxyTls) ? baseRecord.proxyTls : {}),
-        timeout: normalizedTimeoutMs,
-      };
+    if (normalized.headersTimeoutMs !== undefined) {
+      baseRecord.headersTimeout = normalized.headersTimeoutMs;
+    }
+    const connectTimeoutMs = normalized.connectTimeoutMs;
+    if (connectTimeoutMs !== undefined) {
+      if (targets.connect && typeof baseRecord.connect !== "function") {
+        baseRecord.connect = {
+          ...(isObjectRecord(baseRecord.connect) ? baseRecord.connect : {}),
+          timeout: connectTimeoutMs,
+        };
+      }
+      if (targets.proxyTls) {
+        baseRecord.proxyTls = {
+          ...(isObjectRecord(baseRecord.proxyTls) ? baseRecord.proxyTls : {}),
+          timeout: connectTimeoutMs,
+        };
+      }
     }
   }
   return base;
@@ -113,19 +171,19 @@ function withHttp1OnlyDispatcherOptions<T extends object | undefined>(
 
 export function createHttp1Agent(
   options?: UndiciAgentOptions,
-  timeoutMs?: number,
+  timeout?: number | DispatcherTimeoutSpec,
 ): import("undici").Agent {
   const { Agent } = loadUndiciRuntimeDeps();
-  return new Agent(withHttp1OnlyDispatcherOptions(options, timeoutMs));
+  return new Agent(withHttp1OnlyDispatcherOptions(options, timeout));
 }
 
 export function createHttp1EnvHttpProxyAgent(
   options?: UndiciEnvHttpProxyAgentOptions,
-  timeoutMs?: number,
+  timeout?: number | DispatcherTimeoutSpec,
 ): import("undici").EnvHttpProxyAgent {
   const { EnvHttpProxyAgent } = loadUndiciRuntimeDeps();
   return new EnvHttpProxyAgent(
-    withHttp1OnlyDispatcherOptions(options, timeoutMs, {
+    withHttp1OnlyDispatcherOptions(options, timeout, {
       connect: true,
       proxyTls: true,
     }),
@@ -134,7 +192,7 @@ export function createHttp1EnvHttpProxyAgent(
 
 export function createHttp1ProxyAgent(
   options: UndiciProxyAgentOptions,
-  timeoutMs?: number,
+  timeout?: number | DispatcherTimeoutSpec,
 ): import("undici").ProxyAgent {
   const { ProxyAgent } = loadUndiciRuntimeDeps();
   const normalized =
@@ -142,7 +200,7 @@ export function createHttp1ProxyAgent(
       ? { uri: options.toString() }
       : { ...options };
   return new ProxyAgent(
-    withHttp1OnlyDispatcherOptions(normalized as object, timeoutMs, {
+    withHttp1OnlyDispatcherOptions(normalized as object, timeout, {
       proxyTls: true,
     }) as UndiciProxyAgentOptions,
   );

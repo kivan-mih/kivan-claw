@@ -18,6 +18,7 @@ import {
   createHttp1Agent,
   createHttp1EnvHttpProxyAgent,
   createHttp1ProxyAgent,
+  type DispatcherTimeoutSpec,
 } from "./undici-runtime.js";
 
 type LookupCallback = (
@@ -517,12 +518,12 @@ export function createPinnedDispatcher(
   pinned: PinnedHostname,
   policy?: PinnedDispatcherPolicy,
   ssrfPolicy?: SsrFPolicy,
-  timeoutMs?: number,
+  timeout?: number | DispatcherTimeoutSpec,
 ): Dispatcher {
   const lookup = resolvePinnedDispatcherLookup(pinned, policy?.pinnedHostname, ssrfPolicy);
 
   if (!policy || policy.mode === "direct") {
-    return createHttp1Agent({ connect: withPinnedLookup(lookup, policy?.connect) }, timeoutMs);
+    return createHttp1Agent({ connect: withPinnedLookup(lookup, policy?.connect) }, timeout);
   }
 
   if (policy.mode === "env-proxy") {
@@ -531,14 +532,14 @@ export function createPinnedDispatcher(
         connect: withPinnedLookup(lookup, policy.connect),
         ...(policy.proxyTls ? { proxyTls: { ...policy.proxyTls } } : {}),
       },
-      timeoutMs,
+      timeout,
     );
   }
 
   const proxyUrl = policy.proxyUrl.trim();
   const requestTls = withPinnedLookup(lookup, policy.proxyTls);
   if (!requestTls) {
-    return createHttp1ProxyAgent({ uri: proxyUrl }, timeoutMs);
+    return createHttp1ProxyAgent({ uri: proxyUrl }, timeout);
   }
   return createHttp1ProxyAgent(
     {
@@ -548,7 +549,7 @@ export function createPinnedDispatcher(
       // `requestTls` so HTTPS proxy tunnels keep the pinned DNS lookup.
       requestTls,
     },
-    timeoutMs,
+    timeout,
   );
 }
 

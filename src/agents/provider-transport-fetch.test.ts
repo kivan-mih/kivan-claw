@@ -252,6 +252,43 @@ describe("buildGuardedModelFetch", () => {
     );
   });
 
+  it("passes LLM headers/body timeouts for cloud providers", async () => {
+    const { buildGuardedModelFetch } = await import("./provider-transport-fetch.js");
+    const model = {
+      id: "glm-5.1",
+      provider: "z-ai",
+      api: "openai",
+      baseUrl: "https://api.z.ai/api/paas/v4",
+    } as unknown as Model<"openai">;
+
+    const fetcher = buildGuardedModelFetch(model);
+    await fetcher("https://api.z.ai/api/paas/v4/chat/completions", { method: "POST" });
+
+    expect(fetchWithSsrFGuardMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        headersTimeoutMs: 30_000,
+        bodyTimeoutMs: 120_000,
+      }),
+    );
+  });
+
+  it("skips LLM headers/body timeouts for local providers (loopback baseUrl)", async () => {
+    const { buildGuardedModelFetch } = await import("./provider-transport-fetch.js");
+    const model = {
+      id: "qwen3:32b",
+      provider: "ollama",
+      api: "ollama",
+      baseUrl: "http://127.0.0.1:11434",
+    } as unknown as Model<"ollama">;
+
+    const fetcher = buildGuardedModelFetch(model);
+    await fetcher("http://127.0.0.1:11434/api/chat", { method: "POST" });
+
+    const guardedFetchCall = fetchWithSsrFGuardMock.mock.calls[0]?.[0] ?? {};
+    expect(guardedFetchCall).not.toHaveProperty("headersTimeoutMs");
+    expect(guardedFetchCall).not.toHaveProperty("bodyTimeoutMs");
+  });
+
   it("does not force explicit debug proxy overrides onto plain HTTP model transports", async () => {
     process.env.OPENCLAW_DEBUG_PROXY_ENABLED = "1";
     process.env.OPENCLAW_DEBUG_PROXY_URL = "http://127.0.0.1:7799";

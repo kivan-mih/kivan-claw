@@ -50,7 +50,7 @@ const MAX_SAFE_TIMEOUT_MS = 2_147_000_000;
  *    users can use the IP directly or set
  *    `models.providers.<id>.timeoutSeconds` explicitly.
  */
-function isLocalProviderBaseUrl(baseUrl: string): boolean {
+export function isLocalProviderBaseUrl(baseUrl: string): boolean {
   let host: string;
   try {
     host = new URL(baseUrl).hostname.toLowerCase();

@@ -28,6 +28,7 @@ import {
   createHttp1Agent,
   createHttp1EnvHttpProxyAgent,
   createHttp1ProxyAgent,
+  type DispatcherTimeoutSpec,
 } from "./undici-runtime.js";
 
 function resolveDispatcherTimeoutMs(fromParams: number | undefined): number | undefined {
@@ -40,6 +41,59 @@ function resolveDispatcherTimeoutMs(fromParams: number | undefined): number | un
     return _globalUndiciStreamTimeoutMs;
   }
   return undefined;
+}
+
+function resolveDispatcherTimeoutSpec(
+  params: GuardedFetchOptions,
+): number | DispatcherTimeoutSpec | undefined {
+  const headersTimeoutMs =
+    typeof params.headersTimeoutMs === "number" &&
+    Number.isFinite(params.headersTimeoutMs) &&
+    params.headersTimeoutMs > 0
+      ? Math.floor(params.headersTimeoutMs)
+      : undefined;
+  const bodyTimeoutMs =
+    typeof params.bodyTimeoutMs === "number" &&
+    Number.isFinite(params.bodyTimeoutMs) &&
+    params.bodyTimeoutMs > 0
+      ? Math.floor(params.bodyTimeoutMs)
+      : undefined;
+  const connectTimeoutMs =
+    typeof params.connectTimeoutMs === "number" &&
+    Number.isFinite(params.connectTimeoutMs) &&
+    params.connectTimeoutMs > 0
+      ? Math.floor(params.connectTimeoutMs)
+      : undefined;
+  if (
+    headersTimeoutMs !== undefined ||
+    bodyTimeoutMs !== undefined ||
+    connectTimeoutMs !== undefined
+  ) {
+    // When the caller has explicit per-phase timeouts, fall back to the
+    // legacy single-value timeout only for the dimensions that were not
+    // specified. This keeps the dispatcher from inheriting Undici's native
+    // 5-minute defaults on the unset axes when the caller intended a tight
+    // headers cap (e.g. LLM fetch) but did not override every value.
+    const fallback = resolveDispatcherTimeoutMs(params.timeoutMs);
+    return {
+      ...(headersTimeoutMs !== undefined
+        ? { headersTimeoutMs }
+        : fallback !== undefined
+          ? { headersTimeoutMs: fallback }
+          : {}),
+      ...(bodyTimeoutMs !== undefined
+        ? { bodyTimeoutMs }
+        : fallback !== undefined
+          ? { bodyTimeoutMs: fallback }
+          : {}),
+      ...(connectTimeoutMs !== undefined
+        ? { connectTimeoutMs }
+        : fallback !== undefined
+          ? { connectTimeoutMs: fallback }
+          : {}),
+    };
+  }
+  return resolveDispatcherTimeoutMs(params.timeoutMs);
 }
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -70,6 +124,25 @@ export type GuardedFetchOptions = {
    */
   allowCrossOriginUnsafeRedirectReplay?: boolean;
   timeoutMs?: number;
+  /**
+   * Undici `headersTimeout` — time-to-first-byte budget at the HTTP layer.
+   * Catches silent providers (no response headers) before the application
+   * layer ever sees a Stream object. When unset, the dispatcher inherits
+   * `timeoutMs` (or Undici's native 5-minute default if that's also unset).
+   */
+  headersTimeoutMs?: number;
+  /**
+   * Undici `bodyTimeout` — inter-chunk inactivity at the HTTP layer (resets
+   * on every received byte). TCP-layer counterpart to the application-level
+   * idle watchdog. When unset, follows the same fallback chain as
+   * `headersTimeoutMs`.
+   */
+  bodyTimeoutMs?: number;
+  /**
+   * Undici connect-timeout for the underlying TCP/TLS handshake. When unset,
+   * follows the same fallback chain as `headersTimeoutMs`.
+   */
+  connectTimeoutMs?: number;
   signal?: AbortSignal;
   requireHttps?: boolean;
   policy?: SsrFPolicy;
@@ -148,7 +221,7 @@ function assertExplicitProxySupportsPinnedDns(
 
 function createPolicyDispatcherWithoutPinnedDns(
   dispatcherPolicy?: PinnedDispatcherPolicy,
-  timeoutMs?: number,
+  timeout?: number | DispatcherTimeoutSpec,
 ): Dispatcher | null {
   if (!dispatcherPolicy) {
     return null;
@@ -157,7 +230,7 @@ function createPolicyDispatcherWithoutPinnedDns(
   if (dispatcherPolicy.mode === "direct") {
     return createHttp1Agent(
       dispatcherPolicy.connect ? { connect: { ...dispatcherPolicy.connect } } : undefined,
-      timeoutMs,
+      timeout,
     );
   }
 
@@ -167,7 +240,7 @@ function createPolicyDispatcherWithoutPinnedDns(
         ...(dispatcherPolicy.connect ? { connect: { ...dispatcherPolicy.connect } } : {}),
         ...(dispatcherPolicy.proxyTls ? { proxyTls: { ...dispatcherPolicy.proxyTls } } : {}),
       },
-      timeoutMs,
+      timeout,
     );
   }
 
@@ -175,10 +248,10 @@ function createPolicyDispatcherWithoutPinnedDns(
   if (dispatcherPolicy.proxyTls) {
     return createHttp1ProxyAgent(
       { uri: proxyUrl, requestTls: { ...dispatcherPolicy.proxyTls } },
-      timeoutMs,
+      timeout,
     );
   }
-  return createHttp1ProxyAgent({ uri: proxyUrl }, timeoutMs);
+  return createHttp1ProxyAgent({ uri: proxyUrl }, timeout);
 }
 
 async function assertExplicitProxyAllowed(
@@ -376,7 +449,7 @@ export async function fetchWithSsrFGuard(params: GuardedFetchOptions): Promise<G
         shouldUseEnvHttpProxyForUrl(parsedUrl.toString());
       const canUseManagedProxy =
         mode === GUARDED_FETCH_MODE.STRICT && isManagedProxyActive() && hasProxyEnvConfigured();
-      const timeoutMs = resolveDispatcherTimeoutMs(params.timeoutMs);
+      const dispatcherTimeout = resolveDispatcherTimeoutSpec(params);
 
       // Trusted env-proxy and pinDns=false can skip local DNS pinning, so keep
       // the pre-DNS hostname/IP policy checks from the pinned path.
@@ -385,24 +458,30 @@ export async function fetchWithSsrFGuard(params: GuardedFetchOptions): Promise<G
       }
 
       if (canUseTrustedEnvProxy) {
-        dispatcher = createHttp1EnvHttpProxyAgent(undefined, timeoutMs);
+        dispatcher = createHttp1EnvHttpProxyAgent(undefined, dispatcherTimeout);
       } else if (canUseManagedProxy) {
         await resolvePinnedHostnameWithPolicy(parsedUrl.hostname, {
           lookupFn: params.lookupFn,
           policy: params.policy,
         });
-        dispatcher = createHttp1EnvHttpProxyAgent(undefined, timeoutMs);
+        dispatcher = createHttp1EnvHttpProxyAgent(undefined, dispatcherTimeout);
       } else if (usesTrustedExplicitProxyMode) {
         // Explicit proxy targets are still checked against the caller's hostname
         // policy, but the proxy does the DNS resolution for the final target.
         assertHostnameAllowedWithPolicy(parsedUrl.hostname, params.policy);
-        dispatcher = createPolicyDispatcherWithoutPinnedDns(params.dispatcherPolicy, timeoutMs);
+        dispatcher = createPolicyDispatcherWithoutPinnedDns(
+          params.dispatcherPolicy,
+          dispatcherTimeout,
+        );
       } else if (params.pinDns === false) {
         await resolvePinnedHostnameWithPolicy(parsedUrl.hostname, {
           lookupFn: params.lookupFn,
           policy: params.policy,
         });
-        dispatcher = createPolicyDispatcherWithoutPinnedDns(params.dispatcherPolicy, timeoutMs);
+        dispatcher = createPolicyDispatcherWithoutPinnedDns(
+          params.dispatcherPolicy,
+          dispatcherTimeout,
+        );
       } else {
         const pinned = await resolvePinnedHostnameWithPolicy(parsedUrl.hostname, {
           lookupFn: params.lookupFn,
@@ -412,7 +491,7 @@ export async function fetchWithSsrFGuard(params: GuardedFetchOptions): Promise<G
           pinned,
           params.dispatcherPolicy,
           params.policy,
-          timeoutMs,
+          dispatcherTimeout,
         );
       }
 
