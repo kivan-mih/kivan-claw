@@ -1,4 +1,5 @@
 services:
+  kivan-claw-openclaw-gateway:
   openclaw-gateway:
     image: ${OPENCLAW_IMAGE}
     build: .
@@ -42,8 +43,12 @@ services:
     # group_add:
     #   - "${DOCKER_GID:-999}"
     networks:
+      - claw2
       - shared
-    #ports:
+      #ports:
+      #  - "127.0.0.1:9990-9999:9990-9999"
+      #  - "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
+      #  - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
       #- "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
       #- "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     command:
@@ -71,6 +76,7 @@ services:
       retries: 5
       start_period: 20s
 
+  kivan-claw-openclaw-cli:
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
     env_file:
@@ -108,12 +114,18 @@ services:
     init: true
     entrypoint: ["node", "--import", "./proxy_fix.ts", "dist/index.js"]
     depends_on:
+      - kivan-claw-openclaw-gateway
       - openclaw-gateway
     networks:
+      - claw2
       - shared
 
 networks:
+  claw2:
+    name: claw2
   shared:
     name: shared
     external: true
+    driver: bridge
+
 
