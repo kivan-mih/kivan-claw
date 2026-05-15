@@ -273,6 +273,70 @@ ARG OPENCLAW_DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 #        docker-ce-cli docker-compose-plugin; \
 #    fi
 
+# Install full Docker stack (daemon + CLI + buildx + compose) for running
+# Docker inside this container under `runtime: sysbox-runc`. Defaults to ON
+# because docker-compose.yml ships with sysbox-runc enabled and cannot pass
+# build args; opt out with --build-arg OPENCLAW_ENABLE_INNER_DOCKER="".
+# Adds ~250MB to the image.
+ARG OPENCLAW_ENABLE_INNER_DOCKER="1"
+ARG OPENCLAW_INNER_DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=openclaw-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
+    if [ -n "$OPENCLAW_ENABLE_INNER_DOCKER" ]; then \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg sudo iptables uidmap && \
+      install -m 0755 -d /etc/apt/keyrings && \
+      curl -fsSL https://download.docker.com/linux/debian/gpg -o /tmp/docker.gpg.asc && \
+      expected_fingerprint="$(printf '%s' "$OPENCLAW_INNER_DOCKER_GPG_FINGERPRINT" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')" && \
+      pub_count="$(gpg --batch --show-keys --with-colons /tmp/docker.gpg.asc | awk -F: '$1 == "pub" { c++ } END { print c+0 }')" && \
+      if [ "$pub_count" != "1" ]; then \
+        echo "ERROR: Docker apt key must contain exactly one public key (found $pub_count)" >&2; exit 1; \
+      fi && \
+      actual_fingerprint="$(gpg --batch --show-keys --with-colons /tmp/docker.gpg.asc | awk -F: '$1 == "fpr" { print toupper($10); exit }')" && \
+      if [ "$actual_fingerprint" != "$expected_fingerprint" ]; then \
+        echo "ERROR: Docker apt key fingerprint mismatch (expected $expected_fingerprint, got ${actual_fingerprint:-<empty>})" >&2; exit 1; \
+      fi && \
+      gpg --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg.asc && \
+      rm -f /tmp/docker.gpg.asc && \
+      chmod a+r /etc/apt/keyrings/docker.gpg && \
+      printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable\n' \
+        "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.list && \
+      apt-get update && \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+      groupadd -f docker && usermod -aG docker node && \
+      printf 'node ALL=(root) NOPASSWD: /usr/bin/dockerd\n' > /etc/sudoers.d/openclaw-dockerd && \
+      chmod 0440 /etc/sudoers.d/openclaw-dockerd && \
+      visudo -cf /etc/sudoers.d/openclaw-dockerd; \
+    fi
+
+# Entrypoint wraps the CMD: if dockerd is installed, start it (as root via
+# sudo NOPASSWD), wait for the socket, then exec the main command as the
+# current user (node). No-op when Docker isn't installed.
+COPY --chmod=0755 <<'OPENCLAW_ENTRYPOINT_EOF' /usr/local/bin/openclaw-entrypoint.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v dockerd >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  if [[ ! -S /var/run/docker.sock ]]; then
+    sudo -n -b sh -c 'exec dockerd >/var/log/dockerd.log 2>&1' >/dev/null 2>&1 || true
+    for _ in $(seq 1 30); do
+      [[ -S /var/run/docker.sock ]] && break
+      sleep 1
+    done
+    if [[ ! -S /var/run/docker.sock ]]; then
+      echo "[openclaw-entrypoint] dockerd failed to start; tail of /var/log/dockerd.log:" >&2
+      sudo -n tail -n 50 /var/log/dockerd.log >&2 2>/dev/null || true
+    fi
+  fi
+fi
+
+exec "$@"
+OPENCLAW_ENTRYPOINT_EOF
+
+ENTRYPOINT ["/usr/local/bin/openclaw-entrypoint.sh"]
+
 # Expose the CLI binary without requiring npm global writes as non-root.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
  && chmod 755 /app/openclaw.mjs
