@@ -11,6 +11,23 @@ export const CHANNEL_API_RETRY_DEFAULTS = {
   jitter: 0.1,
 };
 
+/**
+ * Retry defaults for non-idempotent Telegram sends (sendMessage, sendSticker,
+ * sendPoll, createForumTopic). Broader than CHANNEL_API_RETRY_DEFAULTS:
+ * exponential backoff with per-sleep cap at 5 minutes, up to 10 attempts. Total
+ * wall time can reach ~8.5 minutes between first failure and final attempt.
+ *
+ * Pair with the broader `isRetriableTelegramSendError` predicate at the
+ * call-site. Accepts duplicate-message risk in exchange for resilience against
+ * transient mid-flight network errors (ECONNRESET, ETIMEDOUT, UND_ERR_*, etc.).
+ */
+export const TELEGRAM_NON_IDEMPOTENT_SEND_RETRY_DEFAULTS = {
+  attempts: 10,
+  minDelayMs: 1_000,
+  maxDelayMs: 300_000,
+  jitter: 0.1,
+};
+
 const CHANNEL_API_RETRY_RE = /429|timeout|connect|reset|closed|unavailable|temporarily/i;
 const log = createSubsystemLogger("retry-policy");
 
@@ -93,8 +110,15 @@ export function createChannelApiRetryRunner(params: {
    * the regex fallback would cause duplicate message delivery.
    */
   strictShouldRetry?: boolean;
+  /**
+   * Override the baseline retry defaults. Falls back to
+   * CHANNEL_API_RETRY_DEFAULTS. Use TELEGRAM_NON_IDEMPOTENT_SEND_RETRY_DEFAULTS
+   * for sendMessage-style flows that want the broader attempts/per-sleep cap.
+   * Per-account `configRetry` and per-call `retry` still override these.
+   */
+  defaults?: Required<RetryConfig>;
 }): RetryRunner {
-  const retryConfig = resolveRetryConfig(CHANNEL_API_RETRY_DEFAULTS, {
+  const retryConfig = resolveRetryConfig(params.defaults ?? CHANNEL_API_RETRY_DEFAULTS, {
     ...params.configRetry,
     ...params.retry,
   });

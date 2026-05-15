@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getTelegramNetworkErrorOrigin,
   isRecoverableTelegramNetworkError,
+  isRetriableTelegramSendError,
   isTelegramRateLimitError,
   isSafeToRetrySendError,
   isTelegramClientRejection,
@@ -209,6 +210,83 @@ describe("isSafeToRetrySendError", () => {
       new TypeError("fetch failed"),
     );
     expect(isSafeToRetrySendError(wrapped)).toBe(false);
+  });
+});
+
+describe("isRetriableTelegramSendError", () => {
+  class MockHttpError extends Error {
+    constructor(
+      message: string,
+      public readonly error: unknown,
+    ) {
+      super(message);
+      this.name = "HttpError";
+    }
+  }
+
+  it.each([
+    ["ECONNREFUSED", "connect ECONNREFUSED"],
+    ["ENOTFOUND", "getaddrinfo ENOTFOUND"],
+    ["EAI_AGAIN", "getaddrinfo EAI_AGAIN"],
+    ["ENETUNREACH", "connect ENETUNREACH"],
+    ["EHOSTUNREACH", "connect EHOSTUNREACH"],
+    ["ECONNRESET", "read ECONNRESET"],
+    ["ETIMEDOUT", "connect ETIMEDOUT"],
+    ["ESOCKETTIMEDOUT", "socket timeout"],
+    ["EPIPE", "write EPIPE"],
+    ["ECONNABORTED", "aborted"],
+    ["ERR_NETWORK", "network error"],
+    ["UND_ERR_CONNECT_TIMEOUT", "connect timeout"],
+    ["UND_ERR_HEADERS_TIMEOUT", "headers timeout"],
+    ["UND_ERR_BODY_TIMEOUT", "body timeout"],
+    ["UND_ERR_SOCKET", "socket error"],
+    ["UND_ERR_ABORTED", "aborted"],
+  ])("retries transient network code %s", (code, message) => {
+    expect(isRetriableTelegramSendError(errorWithCode(message, code))).toBe(true);
+  });
+
+  it.each([
+    "AbortError",
+    "TimeoutError",
+    "ConnectTimeoutError",
+    "HeadersTimeoutError",
+    "BodyTimeoutError",
+  ])("retries on recoverable error name %s", (name) => {
+    const err = Object.assign(new Error("operation aborted"), { name });
+    expect(isRetriableTelegramSendError(err)).toBe(true);
+  });
+
+  it("retries on undici-style 'fetch failed' TypeError without code", () => {
+    expect(isRetriableTelegramSendError(new TypeError("fetch failed"))).toBe(true);
+  });
+
+  it("retries on grammY HttpError wrapping ECONNRESET", () => {
+    const root = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    const fetchError = Object.assign(new TypeError("fetch failed"), { cause: root });
+    const wrapped = new MockHttpError("Network request for 'sendMessage' failed!", fetchError);
+    expect(isRetriableTelegramSendError(wrapped)).toBe(true);
+  });
+
+  it("retries on grammY HttpError wrapping a plain TypeError('fetch failed')", () => {
+    const wrapped = new MockHttpError(
+      "Network request for 'sendMessage' failed!",
+      new TypeError("fetch failed"),
+    );
+    expect(isRetriableTelegramSendError(wrapped)).toBe(true);
+  });
+
+  it("retries on grammY 'Network request ... failed after' wrapper message", () => {
+    const err = new Error("Network request for 'sendMessage' failed after 5 retries!");
+    expect(isRetriableTelegramSendError(err)).toBe(true);
+  });
+
+  it("does not retry on plain Telegram API rejection (no network code/name)", () => {
+    expect(isRetriableTelegramSendError(new Error("400: Bad Request"))).toBe(false);
+  });
+
+  it("does not retry on null/undefined", () => {
+    expect(isRetriableTelegramSendError(null)).toBe(false);
+    expect(isRetriableTelegramSendError(undefined)).toBe(false);
   });
 });
 

@@ -4,7 +4,11 @@ import { type ApiClientOptions, Bot, HttpError } from "grammy";
 import { recordChannelActivity } from "openclaw/plugin-sdk/channel-activity-runtime";
 import { isDiagnosticFlagEnabled } from "openclaw/plugin-sdk/diagnostic-runtime";
 import { formatUncaughtError } from "openclaw/plugin-sdk/error-runtime";
-import { createTelegramRetryRunner, type RetryConfig } from "openclaw/plugin-sdk/retry-runtime";
+import {
+  createTelegramRetryRunner,
+  type RetryConfig,
+  TELEGRAM_NON_IDEMPOTENT_SEND_RETRY_DEFAULTS,
+} from "openclaw/plugin-sdk/retry-runtime";
 import { createSubsystemLogger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
 import { normalizeOptionalString, redactSensitiveText } from "openclaw/plugin-sdk/text-runtime";
@@ -19,7 +23,7 @@ import { renderTelegramHtmlText, splitTelegramHtmlChunks } from "./format.js";
 import { buildInlineKeyboard } from "./inline-keyboard.js";
 import {
   isRecoverableTelegramNetworkError,
-  isSafeToRetrySendError,
+  isRetriableTelegramSendError,
   isTelegramRateLimitError,
   isTelegramServerError,
 } from "./network-errors.js";
@@ -465,6 +469,8 @@ function createTelegramRequestWithDiag(params: {
   shouldRetry?: (err: unknown) => boolean;
   /** When true, the shouldRetry predicate is used exclusively without the TELEGRAM_RETRY_RE fallback. */
   strictShouldRetry?: boolean;
+  /** Override the baseline retry defaults; passed through to the retry runner. */
+  defaults?: Required<RetryConfig>;
   useApiErrorLogging?: boolean;
 }): TelegramRequestWithDiag {
   const request = createTelegramRetryRunner({
@@ -473,6 +479,7 @@ function createTelegramRequestWithDiag(params: {
     verbose: params.verbose,
     ...(params.shouldRetry ? { shouldRetry: params.shouldRetry } : {}),
     ...(params.strictShouldRetry ? { strictShouldRetry: true } : {}),
+    ...(params.defaults ? { defaults: params.defaults } : {}),
   });
   const logHttpError = createTelegramHttpLogger(params.cfg);
   return <T>(
@@ -577,8 +584,9 @@ function createTelegramNonIdempotentRequestWithDiag(params: {
     retry: params.retry,
     verbose: params.verbose,
     useApiErrorLogging: params.useApiErrorLogging,
-    shouldRetry: (err) => isSafeToRetrySendError(err) || isTelegramRateLimitError(err),
+    shouldRetry: (err) => isRetriableTelegramSendError(err) || isTelegramRateLimitError(err),
     strictShouldRetry: true,
+    defaults: TELEGRAM_NON_IDEMPOTENT_SEND_RETRY_DEFAULTS,
   });
 }
 

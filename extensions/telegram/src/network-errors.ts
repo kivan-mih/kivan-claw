@@ -171,6 +171,44 @@ export function isSafeToRetrySendError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * Returns true for any transient network error worth retrying on a Telegram send.
+ * Broader than isSafeToRetrySendError: includes ECONNRESET, ETIMEDOUT, EPIPE,
+ * UND_ERR_*, AbortError, TimeoutError, grammy "Network request ... failed after"
+ * wrapper, and "fetch failed".
+ *
+ * Duplicate-message risk: unlike isSafeToRetrySendError, this matches errors that
+ * may fire *after* Telegram received the request (e.g. mid-response ECONNRESET).
+ * Retrying can then deliver a second copy to the user. Telegram Bot API has no
+ * idempotency key for sendMessage, so we accept this trade-off here in exchange
+ * for resilience against transient outages. Callers that need the strict
+ * "guaranteed not delivered" semantics (state-machine guards) must keep using
+ * isSafeToRetrySendError.
+ */
+export function isRetriableTelegramSendError(err: unknown): boolean {
+  if (!err) {
+    return false;
+  }
+  for (const candidate of collectTelegramErrorCandidates(err)) {
+    const code = normalizeCode(getErrorCode(candidate));
+    if (code && RECOVERABLE_ERROR_CODES.has(code)) {
+      return true;
+    }
+    const name = readErrorName(candidate);
+    if (name && RECOVERABLE_ERROR_NAMES.has(name)) {
+      return true;
+    }
+    const message = normalizeLowercaseStringOrEmpty(formatErrorMessage(candidate));
+    if (message && ALWAYS_RECOVERABLE_MESSAGES.has(message)) {
+      return true;
+    }
+    if (message && GRAMMY_NETWORK_REQUEST_FAILED_AFTER_RE.test(message)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function hasTelegramErrorCode(err: unknown, matches: (code: number) => boolean): boolean {
   for (const candidate of collectTelegramErrorCandidates(err)) {
     if (!candidate || typeof candidate !== "object" || !("error_code" in candidate)) {

@@ -1,10 +1,13 @@
 import { type Bot, GrammyError } from "grammy";
-import { createTelegramRetryRunner } from "openclaw/plugin-sdk/retry-runtime";
+import {
+  createTelegramRetryRunner,
+  TELEGRAM_NON_IDEMPOTENT_SEND_RETRY_DEFAULTS,
+} from "openclaw/plugin-sdk/retry-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
 import { withTelegramApiErrorLogging } from "../api-logging.js";
 import { markdownToTelegramHtml } from "../format.js";
-import { isSafeToRetrySendError, isTelegramRateLimitError } from "../network-errors.js";
+import { isRetriableTelegramSendError, isTelegramRateLimitError } from "../network-errors.js";
 import {
   buildTelegramSendParams,
   getTelegramNativeQuoteReplyMessageId,
@@ -55,8 +58,9 @@ function removeMessageThreadIdParam(
 
 function createTelegramDeliverySendRetry() {
   return createTelegramRetryRunner({
-    shouldRetry: (err) => isSafeToRetrySendError(err) || isTelegramRateLimitError(err),
+    shouldRetry: (err) => isRetriableTelegramSendError(err) || isTelegramRateLimitError(err),
     strictShouldRetry: true,
+    defaults: TELEGRAM_NON_IDEMPOTENT_SEND_RETRY_DEFAULTS,
   });
 }
 

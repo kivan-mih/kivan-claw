@@ -799,21 +799,29 @@ describe("deliverReplies", () => {
     vi.useRealTimers();
   });
 
-  it("does not retry final text sends for plain grammY envelopes without a safe cause", async () => {
+  it("retries final text sends for plain grammY envelopes (no safe cause required)", async () => {
+    vi.useFakeTimers();
     const runtime = createRuntime();
-    const sendMessage = vi.fn().mockRejectedValue(createPlainHttpError("sendMessage"));
+    const sendMessage = vi
+      .fn()
+      .mockRejectedValueOnce(createPlainHttpError("sendMessage"))
+      .mockResolvedValueOnce({
+        message_id: 17,
+        chat: { id: "123" },
+      });
     const bot = createBot({ sendMessage });
 
-    await expect(
-      deliverWith({
-        replies: [{ text: "hello" }],
-        runtime,
-        bot,
-      }),
-    ).rejects.toThrow(/Network request for 'sendMessage' failed!/);
+    const delivered = deliverWith({
+      replies: [{ text: "hello" }],
+      runtime,
+      bot,
+    });
+    await vi.runAllTimersAsync();
+    await delivered;
 
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(runtime.error).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(runtime.error).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("retries media sends without message_thread_id for DM topics", async () => {

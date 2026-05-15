@@ -1255,13 +1255,14 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("does not retry generic grammY failed-after envelopes for non-idempotent sends", async () => {
+  it("retries generic grammY failed-after envelopes on non-idempotent sends", async () => {
     const chatId = "123";
     const sendMessage = vi
       .fn()
       .mockRejectedValueOnce(
         new Error("Network request for 'sendMessage' failed after 1 attempts."),
-      );
+      )
+      .mockResolvedValueOnce({ message_id: 1, chat: { id: chatId } });
     const api = { sendMessage } as unknown as {
       sendMessage: typeof sendMessage;
     };
@@ -1273,8 +1274,8 @@ describe("sendMessageTelegram", () => {
         api,
         retry: { attempts: 2, minDelayMs: 0, maxDelayMs: 0, jitter: 0 },
       }),
-    ).rejects.toThrow(/failed after 1 attempts/i);
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    ).resolves.toEqual({ messageId: "1", chatId });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
   });
 
   it("sends GIF media as animation", async () => {
