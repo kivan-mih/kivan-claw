@@ -282,12 +282,6 @@ RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
 RUN install -d -m 0700 -o node -g node /home/node/.openclaw && \
     stat -c '%U:%G %a' /home/node/.openclaw | grep -qx 'node:node 700'
 
-# Maven ignores HTTP_PROXY/HTTPS_PROXY env vars; proxy must come from
-# ~/.m2/settings.xml. Pre-create .m2 owned by node so Maven can also write
-# ~/.m2/repository at runtime.
-RUN install -d -m 0755 -o node -g node /home/node/.m2
-COPY --chown=node:node .m2/settings.xml /home/node/.m2/settings.xml
-
 ENV NODE_ENV=production
 
 # Security hardening: Run as non-root user

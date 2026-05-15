@@ -31,6 +31,7 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - /home/kivan/repos/.m2:/home/node/.m2
       - /home/kivan/.ssh:/home/node/.ssh:ro
       - ./.gitconfig:/home/node/.gitconfig:ro
       ## Uncomment the lines below to enable sandbox isolation
