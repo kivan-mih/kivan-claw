@@ -311,9 +311,16 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       visudo -cf /etc/sudoers.d/openclaw-dockerd; \
     fi
 
+# Custom TG pre-auth gate scripts (Python, stdlib only). When
+# /home/node/.openclaw/.tg_user_accepted is absent the entrypoint runs gate.py
+# instead of openclaw — it long-polls the TG bot for the right password,
+# materializes per-user configs from /opt/openclaw-templates, then exits so
+# the entrypoint can launch openclaw normally.
+COPY --chmod=0755 scripts/container /opt/openclaw-bootstrap
+
 # Entrypoint wraps the CMD: if dockerd is installed, start it (as root via
-# sudo NOPASSWD), wait for the socket, then exec the main command as the
-# current user (node). No-op when Docker isn't installed.
+# sudo NOPASSWD), wait for the socket, optionally run the TG gate when
+# .tg_user_accepted is absent, then exec the main command as `node`.
 COPY --chmod=0755 <<'OPENCLAW_ENTRYPOINT_EOF' /usr/local/bin/openclaw-entrypoint.sh
 #!/usr/bin/env bash
 set -euo pipefail
@@ -330,6 +337,12 @@ if command -v dockerd >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
       sudo -n tail -n 50 /var/log/dockerd.log >&2 2>/dev/null || true
     fi
   fi
+fi
+
+CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-/home/node/.openclaw}"
+if [[ ! -f "$CONFIG_DIR/.tg_user_accepted" ]]; then
+  echo "[openclaw-entrypoint] $CONFIG_DIR/.tg_user_accepted absent — starting TG gate" >&2
+  /usr/bin/python3 /opt/openclaw-bootstrap/gate.py
 fi
 
 exec "$@"

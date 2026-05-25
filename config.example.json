@@ -1,0 +1,20 @@
+{
+  "prefix": "kivan-claw",
+  "egress_network_suffix": "egress",
+  "env": {
+    "TG_BOT_TOKEN": "1234567890:CHANGE_ME_AAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ZAI_TOKEN": "zai-CHANGE_ME",
+    "BRAVE_SEARCH_TOKEN": "brave-CHANGE_ME",
+    "HTTP_PROXY": "http://proxy.internal:8080",
+    "OPENCLAW_CONFIG_DIR": "/home/kivan/.openclaw-data",
+    "OPENCLAW_WORKSPACE_DIR": "/home/kivan/.openclaw-workspace",
+    "OPENCLAW_IMAGE": "openclaw:local",
+    "OPENCLAW_GATEWAY_TOKEN": "",
+    "OPENCLAW_GATEWAY_BIND": "lan",
+    "OPENCLAW_GATEWAY_PORT": "18789",
+    "OPENCLAW_BRIDGE_PORT": "18790",
+    "OPENCLAW_NETWORK": "kivan-claw-internal",
+    "USER_ACCEPT_PASSWORD": "letmein-strong",
+    "USER_ACCEPT_WELCOME_TEXT": "Привет! Доступ открыт."
+  }
+}
