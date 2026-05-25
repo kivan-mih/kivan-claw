@@ -9,11 +9,14 @@ read_when:
 
 _Learn about the person you're helping. Update this as you go._
 
-- **Name:**
-- **What to call them:**
-- **Pronouns:** _(optional)_
-- **Timezone:**
+- **Name:** @@TG_FULL_NAME@@
+- **What to call them:** @@TG_FIRST_NAME@@
+- **Pronouns:** _(optional — Telegram does not expose this; ask if it matters)_
+- **Timezone:** _(Telegram does not expose this; ask the user)_
 - **Notes:**
+  - Telegram handle: @@TG_HANDLE@@
+  - Telegram user id: @@TG_USER_ID@@
+  - Preferred language (IETF tag): @@TG_LANGUAGE_CODE@@
 
 ## Context
 
