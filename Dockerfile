@@ -316,7 +316,7 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
 # instead of openclaw — it long-polls the TG bot for the right password,
 # materializes per-user configs from /opt/openclaw-templates, then exits so
 # the entrypoint can launch openclaw normally.
-COPY --chmod=0755 scripts/container /opt/openclaw-bootstrap
+COPY --chmod=0755 templates/config_prep.py templates/gate.py /opt/openclaw-bootstrap/
 
 # Entrypoint wraps the CMD: if dockerd is installed, start it (as root via
 # sudo NOPASSWD), wait for the socket, optionally run the TG gate when

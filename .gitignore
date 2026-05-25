@@ -92,7 +92,9 @@ docs/.local/
 docs/internal/
 tmp/
 IDENTITY.md
+!templates/**/IDENTITY.md
 USER.md
+!templates/**/USER.md
 *.tgz
 *.tar.gz
 *.zip

@@ -1,6 +1,6 @@
 services:
   @@PREFIX@@-openclaw-gateway:
-    image: ${OPENCLAW_IMAGE}
+    image: @@PREFIX@@-openclaw:local
     build: .
     restart: unless-stopped
     env_file:
@@ -19,19 +19,21 @@ services:
       BRAVE_SEARCH_TOKEN: ${BRAVE_SEARCH_TOKEN:-}
       USER_ACCEPT_PASSWORD: ${USER_ACCEPT_PASSWORD:-}
       USER_ACCEPT_WELCOME_TEXT: ${USER_ACCEPT_WELCOME_TEXT:-}
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTP_PROXY:-}
-      http_proxy: ${HTTP_PROXY:-}
-      https_proxy: ${HTTP_PROXY:-}
+      HTTP_PROXY: http://@@PREFIX@@-proxy-guard:3128
+      HTTPS_PROXY: http://@@PREFIX@@-proxy-guard:3128
+      http_proxy: http://@@PREFIX@@-proxy-guard:3128
+      https_proxy: http://@@PREFIX@@-proxy-guard:3128
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
       - ${OPENCLAW_CONFIG_DIR}-templates:/opt/openclaw-templates:ro
       - ./.gitconfig:/home/node/.gitconfig:ro
     networks:
       - @@PREFIX@@-internal
+    depends_on:
+      @@PREFIX@@-proxy-guard:
+        condition: service_started
     command:
       [
         "node",
@@ -58,7 +60,7 @@ services:
       start_period: 20s
 
   @@PREFIX@@-openclaw-cli:
-    image: ${OPENCLAW_IMAGE:-openclaw:local}
+    image: @@PREFIX@@-openclaw:local
     env_file:
       - .env
     cap_drop:
@@ -74,15 +76,14 @@ services:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
       BROWSER: echo
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTP_PROXY:-}
-      http_proxy: ${HTTP_PROXY:-}
-      https_proxy: ${HTTP_PROXY:-}
+      HTTP_PROXY: http://@@PREFIX@@-proxy-guard:3128
+      HTTPS_PROXY: http://@@PREFIX@@-proxy-guard:3128
+      http_proxy: http://@@PREFIX@@-proxy-guard:3128
+      https_proxy: http://@@PREFIX@@-proxy-guard:3128
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
-      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
       - ./.gitconfig:/home/node/.gitconfig:ro
     stdin_open: true
     tty: true
@@ -93,11 +94,52 @@ services:
     networks:
       - @@PREFIX@@-internal
 
+  @@PREFIX@@-proxy-guard:
+    build: ./cp-openclaw-proxy
+    container_name: @@PREFIX@@-proxy-guard
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./cp-openclaw-proxy/config:/app/config
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TELEGRAM_USER_ID: ${PROXY_TELEGRAM_USER_ID:-}
+      VIRUSTOTAL_API_KEY: ${PROXY_VIRUSTOTAL_API_KEY:-}
+      URLHAUS_AUTH_KEY: ${PROXY_URLHAUS_AUTH_KEY:-}
+      WEB_RISK_API_KEY: ${PROXY_WEB_RISK_API_KEY:-}
+      JAVA_OPTS: -Xms64m -Xmx256m
+    networks:
+      - @@PREFIX@@-internal
+      - @@PREFIX@@-egress
+
+  @@PREFIX@@-dashboard-forwarder:
+    image: alpine/socat
+    container_name: @@PREFIX@@-dashboard-forwarder
+    restart: unless-stopped
+    depends_on:
+      - @@PREFIX@@-openclaw-gateway
+    networks:
+      - @@PREFIX@@-internal
+      - @@PREFIX@@-ingress
+    ports:
+      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT}:18789"
+      - "127.0.0.1:${OPENCLAW_BRIDGE_PORT}:18790"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        socat TCP-LISTEN:18789,fork,reuseaddr TCP:@@PREFIX@@-openclaw-gateway:18789 &
+        socat TCP-LISTEN:18790,fork,reuseaddr TCP:@@PREFIX@@-openclaw-gateway:18790 &
+        wait
+
 networks:
   @@PREFIX@@-internal:
-    name: ${OPENCLAW_NETWORK}
+    name: @@PREFIX@@-internal
     driver: bridge
     internal: true
   @@PREFIX@@-egress:
-    name: @@EGRESS_NETWORK@@
+    name: @@PREFIX@@-egress
+    driver: bridge
+  @@PREFIX@@-ingress:
+    name: @@PREFIX@@-ingress
     driver: bridge

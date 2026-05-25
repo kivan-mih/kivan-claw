@@ -5,7 +5,7 @@ Reads a JSON config and emits:
   - .env (in CWD) with the env vars the user listed
   - docker-compose.yml (in CWD) from templates/docker-compose.yml.tmpl
   - copies templates/openclaw-config/ to ${OPENCLAW_CONFIG_DIR}-templates/
-  - mkdirs ${OPENCLAW_CONFIG_DIR} and ${OPENCLAW_WORKSPACE_DIR}
+  - mkdirs ${OPENCLAW_CONFIG_DIR} and its ./workspace subdir
 
 Standard library only.
 """
@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,35 +27,36 @@ TEMPLATES_DIR = REPO_ROOT / "templates"
 COMPOSE_TMPL = TEMPLATES_DIR / "docker-compose.yml.tmpl"
 OPENCLAW_TMPL_DIR = TEMPLATES_DIR / "openclaw-config"
 
+PROXY_REMOTE = "git@github.com:kivan-mih/cp-oclaw-proxy.git"
+PROXY_DIR_NAME = "cp-openclaw-proxy"
+
 ENV_KEYS = (
     "TG_BOT_TOKEN",
     "ZAI_TOKEN",
     "BRAVE_SEARCH_TOKEN",
-    "HTTP_PROXY",
     "OPENCLAW_CONFIG_DIR",
-    "OPENCLAW_WORKSPACE_DIR",
-    "OPENCLAW_IMAGE",
     "OPENCLAW_GATEWAY_TOKEN",
     "OPENCLAW_GATEWAY_BIND",
     "OPENCLAW_GATEWAY_PORT",
     "OPENCLAW_BRIDGE_PORT",
-    "OPENCLAW_NETWORK",
     "USER_ACCEPT_PASSWORD",
     "USER_ACCEPT_WELCOME_TEXT",
+    "PROXY_TELEGRAM_USER_ID",
+    "PROXY_VIRUSTOTAL_API_KEY",
+    "PROXY_URLHAUS_AUTH_KEY",
+    "PROXY_WEB_RISK_API_KEY",
 )
 
 REQUIRED_NONEMPTY = (
     "TG_BOT_TOKEN",
     "ZAI_TOKEN",
     "OPENCLAW_CONFIG_DIR",
-    "OPENCLAW_WORKSPACE_DIR",
-    "OPENCLAW_IMAGE",
     "OPENCLAW_GATEWAY_BIND",
     "OPENCLAW_GATEWAY_PORT",
     "OPENCLAW_BRIDGE_PORT",
-    "OPENCLAW_NETWORK",
     "USER_ACCEPT_PASSWORD",
     "USER_ACCEPT_WELCOME_TEXT",
+    "PROXY_TELEGRAM_USER_ID",
 )
 
 # Values that need quoting in .env when written; matches characters that
@@ -111,12 +113,11 @@ def write_dotenv(env: dict[str, str], dest: Path) -> None:
     print(f"wrote {dest}")
 
 
-def render_compose(prefix: str, egress_network: str, dest: Path) -> None:
+def render_compose(prefix: str, dest: Path) -> None:
     if not COMPOSE_TMPL.is_file():
         die(f"missing template: {COMPOSE_TMPL}")
     text = COMPOSE_TMPL.read_text(encoding="utf-8")
     text = text.replace("@@PREFIX@@", prefix)
-    text = text.replace("@@EGRESS_NETWORK@@", egress_network)
     if "@@" in text:
         die(f"unsubstituted placeholder in {dest}: still contains '@@'")
     dest.write_text(text, encoding="utf-8")
@@ -139,6 +140,28 @@ def copy_openclaw_templates(src: Path, dst: Path) -> None:
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     print(f"ensured dir {path}")
+
+
+def clone_proxy_repo(target: Path) -> None:
+    """Fresh-clone the proxy sidecar repo into target.
+
+    Always-fresh per spec: wipe the directory first, then clone. git clone
+    refuses to write into a non-empty dir, so rmtree is mandatory when the
+    placeholder folder already exists. Any failure (git missing, auth, network)
+    aborts install before we touch the compose/.env files.
+    """
+    if target.exists():
+        shutil.rmtree(target)
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "1", PROXY_REMOTE, str(target)],
+            check=True,
+        )
+    except FileNotFoundError:
+        die("git is not installed or not on PATH; cannot clone proxy repo")
+    except subprocess.CalledProcessError as e:
+        die(f"failed to clone proxy repo {PROXY_REMOTE} (exit {e.returncode})")
+    print(f"cloned {PROXY_REMOTE} -> {target}")
 
 
 def patch_gateway_port(templates_target: Path, port: int) -> None:
@@ -193,10 +216,6 @@ def main(argv: list[str]) -> int:
     if not all(c.isalnum() or c in "-_" for c in prefix):
         die("config.prefix must contain only [A-Za-z0-9_-]")
 
-    egress_suffix = cfg.get("egress_network_suffix", "egress").strip()
-    if not egress_suffix:
-        die("config.egress_network_suffix must be non-empty")
-
     env_in = cfg.get("env") or {}
     if not isinstance(env_in, dict):
         die("config.env must be an object")
@@ -223,25 +242,26 @@ def main(argv: list[str]) -> int:
         env["OPENCLAW_GATEWAY_TOKEN"] = secrets.token_hex(32)
         print("OPENCLAW_GATEWAY_TOKEN was empty; generated a fresh 64-hex token")
 
-    # Derive egress network name from the prefix (not from OPENCLAW_NETWORK)
-    # so the two names share the same base without compounding suffixes:
-    # prefix="kivan-claw", suffix="egress" -> "kivan-claw-egress".
-    egress_network = f"{prefix}-{egress_suffix}"
-
     out_env = args.cwd / ".env"
     out_compose = args.cwd / "docker-compose.yml"
     config_dir = Path(env["OPENCLAW_CONFIG_DIR"]).expanduser()
-    workspace_dir = Path(env["OPENCLAW_WORKSPACE_DIR"]).expanduser()
-    # Normalise the env values back to their canonical Path string so compose's
+    # Normalise the env value back to its canonical Path string so compose's
     # raw '${OPENCLAW_CONFIG_DIR}-templates' interpolation and our host-side
     # write target agree — otherwise a user trailing slash makes the two paths
     # diverge (install.py writes to '/x-templates', compose mounts '/x/-templates').
     env["OPENCLAW_CONFIG_DIR"] = str(config_dir)
-    env["OPENCLAW_WORKSPACE_DIR"] = str(workspace_dir)
     templates_target = config_dir.parent / (config_dir.name + "-templates")
+    # Workspace lives under config_dir as a subfolder; the gateway's config bind
+    # mount covers it automatically, so no separate volume mount is needed.
+    workspace_dir = config_dir / "workspace"
+
+    # Clone the proxy sidecar repo first. If this fails, abort before writing
+    # any compose/env files so the install dir stays in its pre-run state and
+    # the user can fix auth/network and rerun cleanly.
+    clone_proxy_repo(args.cwd / PROXY_DIR_NAME)
 
     write_dotenv(env, out_env)
-    render_compose(prefix, egress_network, out_compose)
+    render_compose(prefix, out_compose)
     copy_openclaw_templates(OPENCLAW_TMPL_DIR, templates_target)
     patch_gateway_port(templates_target, gateway_port)
     ensure_dir(config_dir)
