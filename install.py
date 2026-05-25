@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -58,7 +59,9 @@ REQUIRED_NONEMPTY = (
 
 # Values that need quoting in .env when written; matches characters that
 # Docker Compose v2 dotenv interprets specially or that complicate parsing.
-DOTENV_NEEDS_QUOTE = set(" \t\"'#$\\=()")
+# Includes '\n' and '\r' so multi-line values force quoting (and get escaped
+# below) instead of breaking the .env file structure across lines.
+DOTENV_NEEDS_QUOTE = set(" \t\"'#$\\=()\n\r")
 
 
 def err(msg: str) -> None:
@@ -83,7 +86,18 @@ def quote_dotenv(value: str) -> str:
     if value == "":
         return ""
     if any(c in DOTENV_NEEDS_QUOTE for c in value):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        # Docker Compose v2 interpolates $VAR / ${VAR} inside double-quoted
+        # env_file values, so '$' must be escaped to '\$' or the rest of the
+        # value gets eaten as a variable name. Newlines and carriage returns
+        # must be escaped too — otherwise the .env structure splits across
+        # lines and downstream parsers break.
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "\\$")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        )
         return f'"{escaped}"'
     return value
 
@@ -127,6 +141,36 @@ def ensure_dir(path: Path) -> None:
     print(f"ensured dir {path}")
 
 
+def patch_gateway_port(templates_target: Path, port: int) -> None:
+    """Sync openclaw.json's gateway port with OPENCLAW_GATEWAY_PORT.
+
+    The compose template interpolates OPENCLAW_GATEWAY_PORT into the host
+    mapping, the --port arg, and the healthcheck URL. The matching
+    in-container references (gateway.port and gateway.remote.url) live in
+    openclaw.json, which config_prep renders at runtime — but config_prep
+    only substitutes TG user data, not env vars. install.py runs outside
+    the container with full env in hand, so patch the copied template here.
+    """
+    cfg_path = templates_target / "openclaw.json"
+    if not cfg_path.is_file():
+        return
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    gw = data.get("gateway")
+    if isinstance(gw, dict):
+        gw["port"] = port
+        remote = gw.get("remote")
+        if isinstance(remote, dict) and isinstance(remote.get("url"), str):
+            # Replace `:<port>` at the end (or before path/query/fragment).
+            remote["url"] = re.sub(
+                r":\d+(?=[/?#]|$)", f":{port}", remote["url"]
+            )
+    cfg_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"patched {cfg_path}: gateway.port={port}")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("config", type=Path, help="install JSON config")
@@ -168,6 +212,13 @@ def main(argv: list[str]) -> int:
     if missing:
         die(f"required env keys are empty: {', '.join(missing)}")
 
+    try:
+        gateway_port = int(env["OPENCLAW_GATEWAY_PORT"])
+    except ValueError:
+        die(f"OPENCLAW_GATEWAY_PORT must be an integer; got {env['OPENCLAW_GATEWAY_PORT']!r}")
+    if not (1 <= gateway_port <= 65535):
+        die(f"OPENCLAW_GATEWAY_PORT must be in 1..65535; got {gateway_port}")
+
     if not env["OPENCLAW_GATEWAY_TOKEN"]:
         env["OPENCLAW_GATEWAY_TOKEN"] = secrets.token_hex(32)
         print("OPENCLAW_GATEWAY_TOKEN was empty; generated a fresh 64-hex token")
@@ -181,13 +232,30 @@ def main(argv: list[str]) -> int:
     out_compose = args.cwd / "docker-compose.yml"
     config_dir = Path(env["OPENCLAW_CONFIG_DIR"]).expanduser()
     workspace_dir = Path(env["OPENCLAW_WORKSPACE_DIR"]).expanduser()
-    templates_target = Path(str(config_dir) + "-templates")
+    # Normalise the env values back to their canonical Path string so compose's
+    # raw '${OPENCLAW_CONFIG_DIR}-templates' interpolation and our host-side
+    # write target agree — otherwise a user trailing slash makes the two paths
+    # diverge (install.py writes to '/x-templates', compose mounts '/x/-templates').
+    env["OPENCLAW_CONFIG_DIR"] = str(config_dir)
+    env["OPENCLAW_WORKSPACE_DIR"] = str(workspace_dir)
+    templates_target = config_dir.parent / (config_dir.name + "-templates")
 
     write_dotenv(env, out_env)
     render_compose(prefix, egress_network, out_compose)
     copy_openclaw_templates(OPENCLAW_TMPL_DIR, templates_target)
+    patch_gateway_port(templates_target, gateway_port)
     ensure_dir(config_dir)
     ensure_dir(workspace_dir)
+
+    # Compose mounts './.gitconfig:/home/node/.gitconfig:ro'. If the file is
+    # absent at compose-up time, Docker creates an empty *directory* at the
+    # source and bind-mounts a directory over a file path inside the container,
+    # which breaks every git invocation. Touching an empty file here keeps the
+    # mount valid; the operator can fill in [user] / [core] entries afterward.
+    gitconfig = args.cwd / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.touch()
+        print(f"created empty {gitconfig} (add your own [user] block if needed)")
 
     print()
     print("Next steps:")

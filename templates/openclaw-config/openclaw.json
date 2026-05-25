@@ -16,7 +16,7 @@
   },
   "agents": {
     "defaults": {
-      "workspace": "/home/node/.openclaw/workdir/workspaces/workspace",
+      "workspace": "/home/node/.openclaw/workspace",
       "contextTokens": 180000,
       "compaction": {
         "mode": "safeguard",
@@ -39,7 +39,7 @@
       {
         "id": "main",
         "name": "main",
-        "workspace": "/home/node/.openclaw/workdir/workspaces/main",
+        "workspace": "/home/node/.openclaw/workspace",
         "agentDir": "/home/node/.openclaw/agents/main/agent",
         "tools": {}
       }

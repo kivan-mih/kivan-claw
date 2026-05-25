@@ -16,7 +16,6 @@ import json
 import os
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -101,45 +100,49 @@ def main() -> int:
     log(f"waiting for password match on TG bot; config_dir={config_dir}")
     offset = 0
     while True:
+        # One try wraps both the network call and the per-update parse so a
+        # malformed payload (KeyError/ValueError on update_id) or a non-JSON
+        # response (JSONDecodeError) triggers the same retry-and-continue path
+        # as a network error. urllib.error.URLError, ssl.SSLError, and
+        # ConnectionResetError all subclass OSError, so OSError covers them.
         try:
             updates = get_updates(token, offset)
-        except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
-            log(f"poll error: {e}; retrying in {NET_RETRY_SLEEP_S}s")
+            for upd in updates:
+                offset = max(offset, int(upd["update_id"]) + 1)
+                msg = upd.get("message") or {}
+                text = (msg.get("text") or "").strip()
+                from_dict = msg.get("from") or {}
+                chat = msg.get("chat") or {}
+                if not text or not from_dict:
+                    continue
+
+                if text != password:
+                    log(f"non-matching message from user_id={from_dict.get('id')!r} (ignored)")
+                    continue
+
+                log(f"password match from user_id={from_dict.get('id')!r}")
+                try:
+                    config_prep.prepare(
+                        tg_from=from_dict,
+                        templates_dir=templates_dir,
+                        config_dir=config_dir,
+                    )
+                except Exception as e:
+                    log(f"FATAL: config_prep failed: {e}")
+                    return 3
+
+                try:
+                    send_message(token, chat["id"], welcome)
+                except Exception as e:
+                    log(f"send_message failed (continuing): {e}")
+
+                write_accepted(config_dir, from_dict)
+                log("gate passed; handing off to openclaw")
+                return 0
+        except (OSError, TimeoutError, RuntimeError, json.JSONDecodeError, ValueError, KeyError) as e:
+            log(f"poll error: {type(e).__name__}: {e}; retrying in {NET_RETRY_SLEEP_S}s")
             time.sleep(NET_RETRY_SLEEP_S)
             continue
-
-        for upd in updates:
-            offset = max(offset, int(upd["update_id"]) + 1)
-            msg = upd.get("message") or {}
-            text = (msg.get("text") or "").strip()
-            from_dict = msg.get("from") or {}
-            chat = msg.get("chat") or {}
-            if not text or not from_dict:
-                continue
-
-            if text != password:
-                log(f"non-matching message from user_id={from_dict.get('id')!r} (ignored)")
-                continue
-
-            log(f"password match from user_id={from_dict.get('id')!r}")
-            try:
-                config_prep.prepare(
-                    tg_from=from_dict,
-                    templates_dir=templates_dir,
-                    config_dir=config_dir,
-                )
-            except Exception as e:
-                log(f"FATAL: config_prep failed: {e}")
-                return 3
-
-            try:
-                send_message(token, chat["id"], welcome)
-            except Exception as e:
-                log(f"send_message failed (continuing): {e}")
-
-            write_accepted(config_dir, from_dict)
-            log("gate passed; handing off to openclaw")
-            return 0
 
 
 if __name__ == "__main__":

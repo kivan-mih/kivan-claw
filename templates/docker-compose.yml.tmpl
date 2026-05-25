@@ -32,9 +32,6 @@ services:
       - ./.gitconfig:/home/node/.gitconfig:ro
     networks:
       - @@PREFIX@@-internal
-    ports:
-      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
     command:
       [
         "node",
