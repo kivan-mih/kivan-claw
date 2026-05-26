@@ -41,6 +41,10 @@ export async function runAudioTranscription(params: {
       config: params.cfg.tools?.media?.audio,
       activeModel: params.activeModel,
     });
+    params.ctx.MediaUnderstandingDecisions = [
+      ...(params.ctx.MediaUnderstandingDecisions ?? []),
+      result.decision,
+    ];
     const output = result.outputs.find((entry) => entry.kind === "audio.transcription");
     const transcript = output?.text?.trim();
     return { transcript: transcript || undefined, attachments };

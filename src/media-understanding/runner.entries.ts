@@ -423,6 +423,7 @@ async function resolveProviderExecutionAuth(params: {
         primaryApiKey: literalApiKey,
       }),
       providerConfig: params.cfg.models?.providers?.[params.providerId],
+      profileId: undefined,
     };
   }
   const { requireApiKey, resolveApiKeyForProvider } = await loadModelAuth();
@@ -439,6 +440,7 @@ async function resolveProviderExecutionAuth(params: {
       primaryApiKey: requireApiKey(auth, params.providerId),
     }),
     providerConfig: params.cfg.models?.providers?.[params.providerId],
+    profileId: auth.profileId + "[" + auth.mode + "]",
   };
 }
 
@@ -449,7 +451,7 @@ async function resolveProviderExecutionContext(params: {
   config?: MediaUnderstandingConfig;
   agentDir?: string;
 }) {
-  const { apiKeys, providerConfig } = await resolveProviderExecutionAuth({
+  const { apiKeys, providerConfig, profileId } = await resolveProviderExecutionAuth({
     providerId: params.providerId,
     cfg: params.cfg,
     entry: params.entry,
@@ -467,7 +469,7 @@ async function resolveProviderExecutionContext(params: {
     sanitizeConfiguredProviderRequest(params.config?.request),
     sanitizeConfiguredProviderRequest(params.entry.request),
   );
-  return { apiKeys, baseUrl, headers, request };
+  return { apiKeys, baseUrl, headers, request, profileId };
 }
 
 export function formatDecisionSummary(decision: MediaUnderstandingDecision): string {
@@ -617,13 +619,15 @@ export async function runProviderEntry(params: {
       timeoutMs,
     });
     assertMinAudioSize({ size: media.size, attachmentIndex: params.attachmentIndex });
-    const { apiKeys, baseUrl, headers, request } = await resolveProviderExecutionContext({
-      providerId,
-      cfg,
-      entry,
-      config: params.config,
-      agentDir: params.agentDir,
-    });
+    const { apiKeys, baseUrl, headers, request, profileId } = await resolveProviderExecutionContext(
+      {
+        providerId,
+        cfg,
+        entry,
+        config: params.config,
+        agentDir: params.agentDir,
+      },
+    );
     const providerQuery = resolveProviderQuery({
       providerId,
       config: params.config,
@@ -667,6 +671,7 @@ export async function runProviderEntry(params: {
       text: trimOutput(result.text, maxChars),
       provider: providerId,
       model: result.model ?? model,
+      profile: profileId,
     };
   }
 
@@ -687,7 +692,7 @@ export async function runProviderEntry(params: {
       `Video attachment ${params.attachmentIndex + 1} base64 payload ${estimatedBase64Bytes} exceeds ${maxBase64Bytes}`,
     );
   }
-  const { apiKeys, baseUrl, headers, request } = await resolveProviderExecutionContext({
+  const { apiKeys, baseUrl, headers, request, profileId } = await resolveProviderExecutionContext({
     providerId,
     cfg,
     entry,
@@ -718,6 +723,7 @@ export async function runProviderEntry(params: {
     text: trimOutput(result.text, maxChars),
     provider: providerId,
     model: result.model ?? entry.model,
+    profile: profileId,
   };
 }
 

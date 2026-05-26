@@ -825,6 +825,9 @@ async function runAttachmentEntries(params: {
         if (result.model) {
           decision.model = result.model;
         }
+        if (result.profile) {
+          decision.profile = result.profile;
+        }
         attempts.push(decision);
         return { output: result, attempts };
       }
