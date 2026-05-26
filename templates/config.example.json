@@ -3,6 +3,9 @@
   "env": {
     "TG_BOT_TOKEN": "CHANGE_ME-1234567890:CHANGE_ME_AAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "ZAI_TOKEN": "CHANGE_ME-zai-CHANGE_ME",
+    "ADMIN_EMAIL": "CHANGE_ME-you@example.com",
+    "OAI_ACCESS_TOKEN": "CHANGE_ME-oai-access-token",
+    "OAI_REFRESH_TOKEN": "CHANGE_ME-oai-refresh-token",
     "BRAVE_SEARCH_TOKEN": "brave-CHANGE_ME",
     "OPENCLAW_CONFIG_DIR": "CHANGE_ME-/home/something/dockerized/openclaw/volume",
     "OPENCLAW_GATEWAY_TOKEN": "",

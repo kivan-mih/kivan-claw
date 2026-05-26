@@ -5,6 +5,8 @@ Reads a JSON config and emits:
   - .env (in CWD) with the env vars the user listed
   - docker-compose.yml (in CWD) from templates/docker-compose.yml.tmpl
   - copies templates/openclaw-config/ to ${OPENCLAW_CONFIG_DIR}-templates/
+    and substitutes install-time placeholders (@@ADMIN_EMAIL@@,
+    @@OAI_ACCESS_TOKEN@@, @@OAI_REFRESH_TOKEN@@) inside that copy
   - copies templates/openclaw-proxy-data/{allowlist,blocklist}.txt into
     the cloned proxy repo's config/
   - mkdirs ${OPENCLAW_CONFIG_DIR} and its ./workspace subdir
@@ -36,6 +38,9 @@ PROXY_DIR_NAME = "cp-openclaw-proxy"
 ENV_KEYS = (
     "TG_BOT_TOKEN",
     "ZAI_TOKEN",
+    "ADMIN_EMAIL",
+    "OAI_ACCESS_TOKEN",
+    "OAI_REFRESH_TOKEN",
     "BRAVE_SEARCH_TOKEN",
     "OPENCLAW_CONFIG_DIR",
     "OPENCLAW_GATEWAY_TOKEN",
@@ -54,6 +59,9 @@ ENV_KEYS = (
 REQUIRED_NONEMPTY = (
     "TG_BOT_TOKEN",
     "ZAI_TOKEN",
+    "ADMIN_EMAIL",
+    "OAI_ACCESS_TOKEN",
+    "OAI_REFRESH_TOKEN",
     "OPENCLAW_CONFIG_DIR",
     "OPENCLAW_GATEWAY_BIND",
     "OPENCLAW_GATEWAY_PORT",
@@ -63,6 +71,8 @@ REQUIRED_NONEMPTY = (
     "PROXY_TELEGRAM_USER_ID",
     "PROXY_TELEGRAM_BOT_TOKEN",
 )
+
+INSTALL_PLACEHOLDERS = ("ADMIN_EMAIL", "OAI_ACCESS_TOKEN", "OAI_REFRESH_TOKEN")
 
 # Values that need quoting in .env when written; matches characters that
 # Docker Compose v2 dotenv interprets specially or that complicate parsing.
@@ -140,6 +150,33 @@ def copy_openclaw_templates(src: Path, dst: Path) -> None:
     except OSError:
         pass
     print(f"copied {src} -> {dst}")
+
+
+def substitute_install_placeholders(dst: Path, env: dict[str, str]) -> None:
+    # Fills @@ADMIN_EMAIL@@ / @@OAI_*@@ in the copied templates tree.
+    # @@TG_*@@ placeholders are intentionally left alone — config_prep.py
+    # substitutes those at gate-pass time per Telegram user. JSON files get
+    # JSON-escaped values + post-substitution validation; everything else
+    # gets plain text substitution so future .md templates still work.
+    raw = {k: env.get(k, "") for k in INSTALL_PLACEHOLDERS}
+    json_subs = {f"@@{k}@@": json.dumps(v)[1:-1] for k, v in raw.items()}
+    plain_subs = {f"@@{k}@@": v for k, v in raw.items()}
+    for path in dst.rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not any(p in text for p in plain_subs):
+            continue
+        subs = json_subs if path.suffix == ".json" else plain_subs
+        for placeholder, value in subs.items():
+            text = text.replace(placeholder, value)
+        if path.suffix == ".json":
+            try:
+                json.loads(text)
+            except json.JSONDecodeError as e:
+                die(f"substitution produced invalid JSON in {path}: {e}")
+        path.write_text(text, encoding="utf-8")
+        print(f"substituted {path}")
 
 
 def copy_proxy_data_file(src: Path, dst: Path) -> None:
@@ -264,6 +301,7 @@ def main(argv: list[str]) -> int:
     write_dotenv(env, out_env)
     render_compose(prefix, out_compose)
     copy_openclaw_templates(OPENCLAW_TMPL_DIR, templates_target)
+    substitute_install_placeholders(templates_target, env)
     ensure_dir(config_dir)
     ensure_dir(workspace_dir)
 

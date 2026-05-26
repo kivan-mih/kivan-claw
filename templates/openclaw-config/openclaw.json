@@ -11,6 +11,11 @@
       "zai:default": {
         "provider": "zai",
         "mode": "api_key"
+      },
+      "openai-codex:@@ADMIN_EMAIL@@": {
+        "provider": "openai-codex",
+        "mode": "oauth",
+        "email": "@@ADMIN_EMAIL@@"
       }
     }
   },
@@ -33,7 +38,15 @@
         "maxChildrenPerAgent": 5,
         "maxSpawnDepth": 2
       },
-      "model": "zai/glm-5.1"
+      "model": "zai/glm-5.1",
+      "imageModel": {
+        "primary": "openai-codex/gpt-5.5",
+        "fallbacks": ["openai-codex/gpt-5.4"]
+      },
+      "models": {
+        "openai-codex/gpt-5.4": {},
+        "openai-codex/gpt-5.5": {}
+      }
     },
     "list": [
       {
@@ -141,6 +154,9 @@
         "enabled": true
       },
       "zai": {
+        "enabled": true
+      },
+      "openai": {
         "enabled": true
       },
       "brave": {
