@@ -103,7 +103,7 @@ services:
     volumes:
       - ./cp-openclaw-proxy/config:/app/config
     environment:
-      TELEGRAM_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${PROXY_TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_USER_ID: ${PROXY_TELEGRAM_USER_ID:-}
       VIRUSTOTAL_API_KEY: ${PROXY_VIRUSTOTAL_API_KEY:-}
       URLHAUS_AUTH_KEY: ${PROXY_URLHAUS_AUTH_KEY:-}
