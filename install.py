@@ -30,7 +30,7 @@ OPENCLAW_TMPL_DIR = TEMPLATES_DIR / "openclaw-config"
 PROXY_ALLOWLIST_TMPL = TEMPLATES_DIR / "openclaw-proxy-data" / "allowlist.txt"
 PROXY_BLOCKLIST_TMPL = TEMPLATES_DIR / "openclaw-proxy-data" / "blocklist.txt"
 
-PROXY_REMOTE = "git@github.com:kivan-mih/cp-oclaw-proxy.git"
+PROXY_REMOTE = "git@github-ocl-rbt:kivan-mih/cp-oclaw-proxy.git"
 PROXY_DIR_NAME = "cp-openclaw-proxy"
 
 ENV_KEYS = (
