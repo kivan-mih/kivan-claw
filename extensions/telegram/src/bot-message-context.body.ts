@@ -78,8 +78,21 @@ export type TelegramInboundBodyResult = {
   locationData?: NormalizedLocation;
 };
 
-function formatAudioTranscriptForAgent(transcript: string): string {
-  return `[Audio transcript (machine-generated, untrusted)]: ${JSON.stringify(transcript)}`;
+type AudioTranscriptChosen = {
+  provider?: string;
+  model?: string;
+  profile?: string;
+};
+
+function formatAudioTranscriptForAgent(transcript: string, chosen?: AudioTranscriptChosen): string {
+  const parts: string[] = ["machine-generated", "untrusted"];
+  if (chosen?.provider) {
+    parts.push(`via ${chosen.provider}${chosen.model ? `:${chosen.model}` : ""}`);
+  }
+  if (chosen?.profile) {
+    parts.push(`profile=${chosen.profile}`);
+  }
+  return `[Audio transcript (${parts.join(", ")})]: ${JSON.stringify(transcript)}`;
 }
 
 type TelegramSavedMediaKind = "audio" | "document" | "image" | "video";
@@ -243,6 +256,7 @@ export async function resolveTelegramInboundBody(params: {
     !useAccessGroups || !allowForCommands.hasEntries || senderAllowedForCommands;
 
   let preflightTranscript: string | undefined;
+  let preflightChosen: AudioTranscriptChosen | undefined;
   const needsPreflightTranscription =
     hasAudio &&
     !hasUserText &&
@@ -273,6 +287,7 @@ export async function resolveTelegramInboundBody(params: {
         cfg,
         agentDir: undefined,
       });
+      preflightChosen = tempCtx.MediaUnderstandingDecisions?.[0]?.attachments?.[0]?.chosen;
     } catch (err) {
       logVerbose(`telegram: audio preflight transcription failed: ${String(err)}`);
     }
@@ -283,7 +298,7 @@ export async function resolveTelegramInboundBody(params: {
       : allMedia.findIndex((media) => media.contentType?.startsWith("audio/"));
 
   if (hasAudio && bodyText === "<media:audio>" && preflightTranscript) {
-    bodyText = formatAudioTranscriptForAgent(preflightTranscript);
+    bodyText = formatAudioTranscriptForAgent(preflightTranscript, preflightChosen);
   }
 
   const savedMediaPlaceholder = formatSavedMediaPlaceholder(allMedia);
@@ -293,7 +308,7 @@ export async function resolveTelegramInboundBody(params: {
   if (!bodyText && allMedia.length > 0) {
     if (hasAudio) {
       bodyText = preflightTranscript
-        ? formatAudioTranscriptForAgent(preflightTranscript)
+        ? formatAudioTranscriptForAgent(preflightTranscript, preflightChosen)
         : "<media:audio>";
     } else {
       bodyText = savedMediaPlaceholder ?? "<media:document>";

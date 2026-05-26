@@ -26,6 +26,7 @@ export type MediaUnderstandingOutput = {
   text: string;
   provider: string;
   model?: string;
+  profile?: string;
 };
 
 type MediaUnderstandingDecisionOutcome =
@@ -39,6 +40,7 @@ type MediaUnderstandingDecisionOutcome =
 export type MediaUnderstandingModelDecision = {
   provider?: string;
   model?: string;
+  profile?: string;
   type: "provider" | "cli";
   outcome: "success" | "skipped" | "failed";
   reason?: string;
