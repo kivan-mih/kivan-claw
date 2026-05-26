@@ -5,6 +5,8 @@ Reads a JSON config and emits:
   - .env (in CWD) with the env vars the user listed
   - docker-compose.yml (in CWD) from templates/docker-compose.yml.tmpl
   - copies templates/openclaw-config/ to ${OPENCLAW_CONFIG_DIR}-templates/
+  - copies templates/openclaw-proxy-data/{allowlist,blocklist}.txt into
+    the cloned proxy repo's config/
   - mkdirs ${OPENCLAW_CONFIG_DIR} and its ./workspace subdir
 
 Standard library only.
@@ -25,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 TEMPLATES_DIR = REPO_ROOT / "templates"
 COMPOSE_TMPL = TEMPLATES_DIR / "docker-compose.yml.tmpl"
 OPENCLAW_TMPL_DIR = TEMPLATES_DIR / "openclaw-config"
+PROXY_ALLOWLIST_TMPL = TEMPLATES_DIR / "openclaw-proxy-data" / "allowlist.txt"
+PROXY_BLOCKLIST_TMPL = TEMPLATES_DIR / "openclaw-proxy-data" / "blocklist.txt"
 
 PROXY_REMOTE = "git@github.com:kivan-mih/cp-oclaw-proxy.git"
 PROXY_DIR_NAME = "cp-openclaw-proxy"
@@ -136,6 +140,13 @@ def copy_openclaw_templates(src: Path, dst: Path) -> None:
     print(f"copied {src} -> {dst}")
 
 
+def copy_proxy_data_file(src: Path, dst: Path) -> None:
+    if not src.is_file():
+        die(f"missing template file: {src}")
+    shutil.copy(src, dst)
+    print(f"copied {src} -> {dst}")
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     print(f"ensured dir {path}")
@@ -244,6 +255,9 @@ def main(argv: list[str]) -> int:
     # any compose/env files so the install dir stays in its pre-run state and
     # the user can fix auth/network and rerun cleanly.
     clone_proxy_repo(args.cwd / PROXY_DIR_NAME)
+    proxy_config_dir = args.cwd / PROXY_DIR_NAME / "config"
+    copy_proxy_data_file(PROXY_ALLOWLIST_TMPL, proxy_config_dir / "allowlist.txt")
+    copy_proxy_data_file(PROXY_BLOCKLIST_TMPL, proxy_config_dir / "blocklist.txt")
 
     write_dotenv(env, out_env)
     render_compose(prefix, out_compose)
