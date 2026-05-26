@@ -135,10 +135,10 @@ services:
         pid2=$!
         # Exit as soon as either forwarder dies so docker's restart policy
         # actually surfaces the failure; `wait` with no PID always returns 0.
-        wait -n "$pid1" "$pid2"
+        wait -n "$$pid1" "$$pid2"
         rc=$?
-        kill "$pid1" "$pid2" 2>/dev/null || true
-        exit "$rc"
+        kill "$$pid1" "$$pid2" 2>/dev/null || true
+        exit "$$rc"
 
 networks:
   @@PREFIX@@-internal:
