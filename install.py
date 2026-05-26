@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import secrets
 import shutil
 import subprocess
@@ -143,55 +142,41 @@ def ensure_dir(path: Path) -> None:
 
 
 def clone_proxy_repo(target: Path) -> None:
-    """Fresh-clone the proxy sidecar repo into target.
+    """Fresh-clone the proxy sidecar repo into target (non-interactive).
 
-    Always-fresh per spec: wipe the directory first, then clone. git clone
-    refuses to write into a non-empty dir, so rmtree is mandatory when the
-    placeholder folder already exists. Any failure (git missing, auth, network)
-    aborts install before we touch the compose/.env files.
+    Always-fresh per spec: wipe the path first, then clone. We force BatchMode
+    + StrictHostKeyChecking=accept-new so a missing known_hosts entry or a
+    missing SSH key fails fast instead of hanging on a TTY prompt — install
+    may run under cloud-init / CI where stdin is closed. Any failure aborts
+    install before we touch the compose/.env files.
     """
-    if target.exists():
+    if target.is_dir():
         shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+    git_env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND")
+        or "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+    }
     try:
         subprocess.run(
             ["git", "clone", "--depth", "1", PROXY_REMOTE, str(target)],
             check=True,
+            stdin=subprocess.DEVNULL,
+            env=git_env,
         )
     except FileNotFoundError:
         die("git is not installed or not on PATH; cannot clone proxy repo")
     except subprocess.CalledProcessError as e:
-        die(f"failed to clone proxy repo {PROXY_REMOTE} (exit {e.returncode})")
+        die(
+            f"failed to clone proxy repo {PROXY_REMOTE} (exit {e.returncode}).\n"
+            f"  Hint: this URL is SSH-only. Verify `ssh -T git@github.com` "
+            f"works and that the active SSH key has read access to the repo."
+        )
     print(f"cloned {PROXY_REMOTE} -> {target}")
-
-
-def patch_gateway_port(templates_target: Path, port: int) -> None:
-    """Sync openclaw.json's gateway port with OPENCLAW_GATEWAY_PORT.
-
-    The compose template interpolates OPENCLAW_GATEWAY_PORT into the host
-    mapping, the --port arg, and the healthcheck URL. The matching
-    in-container references (gateway.port and gateway.remote.url) live in
-    openclaw.json, which config_prep renders at runtime — but config_prep
-    only substitutes TG user data, not env vars. install.py runs outside
-    the container with full env in hand, so patch the copied template here.
-    """
-    cfg_path = templates_target / "openclaw.json"
-    if not cfg_path.is_file():
-        return
-    data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    gw = data.get("gateway")
-    if isinstance(gw, dict):
-        gw["port"] = port
-        remote = gw.get("remote")
-        if isinstance(remote, dict) and isinstance(remote.get("url"), str):
-            # Replace `:<port>` at the end (or before path/query/fragment).
-            remote["url"] = re.sub(
-                r":\d+(?=[/?#]|$)", f":{port}", remote["url"]
-            )
-    cfg_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(f"patched {cfg_path}: gateway.port={port}")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -263,7 +248,6 @@ def main(argv: list[str]) -> int:
     write_dotenv(env, out_env)
     render_compose(prefix, out_compose)
     copy_openclaw_templates(OPENCLAW_TMPL_DIR, templates_target)
-    patch_gateway_port(templates_target, gateway_port)
     ensure_dir(config_dir)
     ensure_dir(workspace_dir)
 

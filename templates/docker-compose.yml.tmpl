@@ -128,9 +128,17 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        set -e
         socat TCP-LISTEN:18789,fork,reuseaddr TCP:@@PREFIX@@-openclaw-gateway:18789 &
+        pid1=$!
         socat TCP-LISTEN:18790,fork,reuseaddr TCP:@@PREFIX@@-openclaw-gateway:18790 &
-        wait
+        pid2=$!
+        # Exit as soon as either forwarder dies so docker's restart policy
+        # actually surfaces the failure; `wait` with no PID always returns 0.
+        wait -n "$pid1" "$pid2"
+        rc=$?
+        kill "$pid1" "$pid2" 2>/dev/null || true
+        exit "$rc"
 
 networks:
   @@PREFIX@@-internal:
