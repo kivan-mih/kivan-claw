@@ -8,15 +8,15 @@
         "source": "env",
         "provider": "default",
         "id": "ZAI_TOKEN"
-      },
-      "openai-codex:@@ADMIN_EMAIL@@": {
-        "type": "oauth",
-        "provider": "openai-codex",
-        "access": "@@OAI_ACCESS_TOKEN@@",
-        "refresh": "@@OAI_REFRESH_TOKEN@@",
-        "expires": 3000000000000,
-        "email": "@@ADMIN_EMAIL@@"
       }
+    },
+    "openai-codex:@@ADMIN_EMAIL@@": {
+      "type": "oauth",
+      "provider": "openai-codex",
+      "access": "@@OAI_ACCESS_TOKEN@@",
+      "refresh": "@@OAI_REFRESH_TOKEN@@",
+      "expires": 3000000000000,
+      "email": "@@ADMIN_EMAIL@@"
     }
   }
 }
