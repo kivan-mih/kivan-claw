@@ -1,7 +1,10 @@
 services:
   kivan-claw-openclaw-gateway:
     image: ${OPENCLAW_IMAGE}
-    build: .
+    build:
+      context: .
+      args:
+        OPENCLAW_EXTENSIONS: "brave"
     restart: unless-stopped
     env_file:
       - .env
