@@ -162,6 +162,23 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       ca-certificates procps hostname curl git lsof openssl python3 socat maven && \
     update-ca-certificates
 
+# Install document processing tools (PDF, DOC/DOCX, XLS/XLSX, PPTX, OCR, images).
+# Used by skills/extensions for extracting text, converting formats and OCR.
+# Adds ~650 MB to the runtime image (libreoffice dominates).
+# fonts-noto-core is required for Cyrillic glyphs in headless LibreOffice rendering.
+RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=openclaw-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      poppler-utils ghostscript qpdf \
+      pandoc \
+      antiword catdoc \
+      gnumeric \
+      tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
+      imagemagick \
+      libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-draw \
+      fonts-liberation fonts-dejavu fonts-noto-core
+
 # Install Go (pinned tarball; apt's golang is too old for some toolchains).
 RUN curl -sL -o /tmp/go.tar.gz https://go.dev/dl/go1.23.6.linux-amd64.tar.gz \
  && echo "9379441ea310de000f33a4dc767bd966e72ab2826270e038e78b2c53c2e7802d  /tmp/go.tar.gz" | sha256sum -c - \
