@@ -1,6 +1,9 @@
+name: @@PREFIX@@
+
 services:
   @@PREFIX@@-openclaw-gateway:
     image: @@PREFIX@@-openclaw:local
+    container_name: @@PREFIX@@-openclaw-gateway
     build: .
     restart: unless-stopped
     env_file:
@@ -61,6 +64,7 @@ services:
 
   @@PREFIX@@-openclaw-cli:
     image: @@PREFIX@@-openclaw:local
+    container_name: @@PREFIX@@-openclaw-cli
     env_file:
       - .env
     cap_drop:
@@ -95,6 +99,7 @@ services:
       - @@PREFIX@@-internal
 
   @@PREFIX@@-proxy-guard:
+    image: @@PREFIX@@-proxy-guard:local
     build: ./cp-openclaw-proxy
     container_name: @@PREFIX@@-proxy-guard
     restart: unless-stopped
