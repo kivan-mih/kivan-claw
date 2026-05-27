@@ -4,7 +4,10 @@ services:
   @@PREFIX@@-openclaw-gateway:
     image: @@PREFIX@@-openclaw:local
     container_name: @@PREFIX@@-openclaw-gateway
-    build: .
+    build:
+      context: .
+      args:
+        OPENCLAW_EXTENSIONS: "brave"
     restart: unless-stopped
     env_file:
       - .env
