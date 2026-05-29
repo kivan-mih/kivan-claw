@@ -335,17 +335,20 @@ COPY --chmod=0755 <<'OPENCLAW_ENTRYPOINT_EOF' /usr/local/bin/openclaw-entrypoint
 #!/usr/bin/env bash
 set -euo pipefail
 
-if command -v dockerd >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+if command -v dockerd >/dev/null 2>&1 \
+   && sudo -n -l /usr/bin/dockerd >/dev/null 2>&1 \
+   && [[ ! -S /var/run/docker.sock ]]; then
+  # node may run only /usr/bin/dockerd as root (narrow openclaw-dockerd sudoers
+  # rule); invoke it directly. Backgrounding and the log redirect run in this
+  # unprivileged node shell, so no extra sudo grants (sh/true/tail) are needed.
+  sudo -n /usr/bin/dockerd >/tmp/dockerd.log 2>&1 &
+  for _ in $(seq 1 30); do
+    [[ -S /var/run/docker.sock ]] && break
+    sleep 1
+  done
   if [[ ! -S /var/run/docker.sock ]]; then
-    sudo -n -b sh -c 'exec dockerd >/var/log/dockerd.log 2>&1' >/dev/null 2>&1 || true
-    for _ in $(seq 1 30); do
-      [[ -S /var/run/docker.sock ]] && break
-      sleep 1
-    done
-    if [[ ! -S /var/run/docker.sock ]]; then
-      echo "[openclaw-entrypoint] dockerd failed to start; tail of /var/log/dockerd.log:" >&2
-      sudo -n tail -n 50 /var/log/dockerd.log >&2 2>/dev/null || true
-    fi
+    echo "[openclaw-entrypoint] dockerd failed to start; tail of /tmp/dockerd.log:" >&2
+    tail -n 50 /tmp/dockerd.log >&2 2>/dev/null || true
   fi
 fi
 
