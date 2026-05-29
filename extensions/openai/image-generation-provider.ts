@@ -35,10 +35,12 @@ const DEFAULT_OPENAI_CODEX_IMAGE_BASE_URL = OPENAI_CODEX_RESPONSES_BASE_URL;
 const DEFAULT_OPENAI_CODEX_IMAGE_RESPONSES_MODEL = "gpt-5.5";
 const OPENAI_CODEX_IMAGE_INSTRUCTIONS = "You are an image generation assistant.";
 const OPENAI_TRANSPARENT_BACKGROUND_IMAGE_MODEL = "gpt-image-1.5";
-const DEFAULT_OPENAI_IMAGE_TIMEOUT_MS = 180_000;
+const DEFAULT_OPENAI_IMAGE_TIMEOUT_MS = 480_000;
 const DEFAULT_AZURE_OPENAI_IMAGE_TIMEOUT_MS = 600_000;
 const DEFAULT_OUTPUT_MIME = "image/png";
 const DEFAULT_OUTPUT_EXTENSION = "png";
+const DEFAULT_OPENAI_OUTPUT_FORMAT: ImageGenerationOutputFormat = "jpeg";
+const DEFAULT_OPENAI_OUTPUT_COMPRESSION = 90;
 const DEFAULT_SIZE = "1024x1024";
 const OPENAI_SUPPORTED_SIZES = [
   "1024x1024",
@@ -182,20 +184,42 @@ function resolveOutputMime(outputFormat?: ImageGenerationOutputFormat): {
   return { mimeType: DEFAULT_OUTPUT_MIME, extension: DEFAULT_OUTPUT_EXTENSION };
 }
 
+function resolveOpenAIOutputFormat(
+  req: Parameters<ImageGenerationProvider["generateImage"]>[0],
+): ImageGenerationOutputFormat {
+  if (req.outputFormat !== undefined) {
+    return req.outputFormat;
+  }
+  const background = req.providerOptions?.openai?.background ?? req.background;
+  // JPEG has no alpha channel; keep PNG when a transparent background is requested.
+  return background === "transparent" ? "png" : DEFAULT_OPENAI_OUTPUT_FORMAT;
+}
+
+function resolveOpenAIOutputCompression(
+  req: Parameters<ImageGenerationProvider["generateImage"]>[0],
+  format: ImageGenerationOutputFormat,
+): number | undefined {
+  const explicit = req.providerOptions?.openai?.outputCompression;
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  return format === "jpeg" || format === "webp" ? DEFAULT_OPENAI_OUTPUT_COMPRESSION : undefined;
+}
+
 function appendOpenAIImageOptions(
   target: Record<string, unknown> | FormData,
   req: Parameters<ImageGenerationProvider["generateImage"]>[0],
 ): void {
   const openai = req.providerOptions?.openai;
   const background = openai?.background ?? req.background;
+  const outputFormat = resolveOpenAIOutputFormat(req);
+  const outputCompression = resolveOpenAIOutputCompression(req, outputFormat);
   const entries: Record<string, unknown> = {
     ...(req.quality !== undefined ? { quality: req.quality } : {}),
-    ...(req.outputFormat !== undefined ? { output_format: req.outputFormat } : {}),
+    output_format: outputFormat,
     ...(background !== undefined ? { background } : {}),
     ...(openai?.moderation !== undefined ? { moderation: openai.moderation } : {}),
-    ...(openai?.outputCompression !== undefined
-      ? { output_compression: openai.outputCompression }
-      : {}),
+    ...(outputCompression !== undefined ? { output_compression: outputCompression } : {}),
     ...(openai?.user !== undefined ? { user: openai.user } : {}),
   };
   for (const [key, value] of Object.entries(entries)) {
@@ -637,6 +661,8 @@ async function generateOpenAICodexImage(params: {
   const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs);
   const openai = req.providerOptions?.openai;
   const background = openai?.background ?? req.background;
+  const outputFormat = resolveOpenAIOutputFormat(req);
+  const outputCompression = resolveOpenAIOutputCompression(req, outputFormat);
   headers.set("Content-Type", "application/json");
   const content: Array<Record<string, unknown>> = [
     { type: "input_text", text: req.prompt },
@@ -666,11 +692,9 @@ async function generateOpenAICodexImage(params: {
             model,
             size,
             ...(req.quality !== undefined ? { quality: req.quality } : {}),
-            ...(req.outputFormat !== undefined ? { output_format: req.outputFormat } : {}),
+            output_format: outputFormat,
             ...(background !== undefined ? { background } : {}),
-            ...(openai?.outputCompression !== undefined
-              ? { output_compression: openai.outputCompression }
-              : {}),
+            ...(outputCompression !== undefined ? { output_compression: outputCompression } : {}),
           },
         ],
         tool_choice: { type: "image_generation" },
@@ -689,7 +713,7 @@ async function generateOpenAICodexImage(params: {
         extractCodexImageGenerationResult({
           body: await readResponseBodyText(response),
           model,
-          outputFormat: req.outputFormat,
+          outputFormat,
         }),
       );
     } finally {
@@ -697,7 +721,7 @@ async function generateOpenAICodexImage(params: {
     }
   }
   const images = results.flatMap((result) => result.images);
-  const output = resolveOutputMime(req.outputFormat);
+  const output = resolveOutputMime(outputFormat);
   return {
     images: images.map((image, index) =>
       Object.assign({}, image, {
@@ -874,7 +898,7 @@ export function buildOpenAIImageGenerationProvider(): ImageGenerationProvider {
         );
 
         const data = (await response.json()) as OpenAIImageApiResponse;
-        const output = resolveOutputMime(req.outputFormat);
+        const output = resolveOutputMime(resolveOpenAIOutputFormat(req));
         const images = parseOpenAiCompatibleImageResponse(data, {
           defaultMimeType: output.mimeType,
         }).map((image, index) =>

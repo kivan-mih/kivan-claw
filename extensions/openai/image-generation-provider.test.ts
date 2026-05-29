@@ -385,6 +385,8 @@ describe("openai image generation provider", () => {
           prompt: "Create two landscape campaign variants",
           n: 2,
           size: "3840x2160",
+          output_format: "jpeg",
+          output_compression: 90,
         },
       }),
     );
@@ -518,6 +520,33 @@ describe("openai image generation provider", () => {
         }),
       }),
     );
+    expect(result.model).toBe("gpt-image-1.5");
+  });
+
+  it("defaults transparent-background requests to PNG instead of the JPEG default", async () => {
+    mockGeneratedPngResponse();
+
+    const provider = buildOpenAIImageGenerationProvider();
+    const result = await provider.generateImage({
+      provider: "openai",
+      model: "gpt-image-2",
+      prompt: "Transparent sticker without an explicit format",
+      cfg: {},
+      background: "transparent",
+    });
+
+    expect(postJsonRequestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "https://api.openai.com/v1/images/generations",
+        body: expect.objectContaining({
+          model: "gpt-image-1.5",
+          output_format: "png",
+          background: "transparent",
+        }),
+      }),
+    );
+    const transparentBody = postJsonRequestMock.mock.calls[0]?.[0].body as Record<string, unknown>;
+    expect(transparentBody).not.toHaveProperty("output_compression");
     expect(result.model).toBe("gpt-image-1.5");
   });
 
@@ -772,7 +801,7 @@ describe("openai image generation provider", () => {
     expect(postJsonRequestMock).toHaveBeenCalledWith(
       expect.objectContaining({
         url: "https://chatgpt.com/backend-api/codex/responses",
-        timeoutMs: 180_000,
+        timeoutMs: 480_000,
         body: expect.objectContaining({
           model: "gpt-5.5",
           instructions: "You are an image generation assistant.",
@@ -795,7 +824,7 @@ describe("openai image generation provider", () => {
     );
     expect(postMultipartRequestMock).not.toHaveBeenCalled();
     expect(logInfoMock).toHaveBeenCalledWith(
-      "image auth selected: provider=openai-codex mode=oauth transport=codex-responses requestedModel=gpt-image-2 responsesModel=gpt-5.5 timeoutMs=180000",
+      "image auth selected: provider=openai-codex mode=oauth transport=codex-responses requestedModel=gpt-image-2 responsesModel=gpt-5.5 timeoutMs=480000",
     );
     expect(result.images).toEqual([
       {
@@ -892,7 +921,7 @@ describe("openai image generation provider", () => {
       }),
     );
     expect(logInfoMock).toHaveBeenCalledWith(
-      "image auth selected: provider=openai-codex mode=oauth transport=codex-responses requestedModel=gpt-image-2 responsesModel=gpt-5.5 timeoutMs=180000",
+      "image auth selected: provider=openai-codex mode=oauth transport=codex-responses requestedModel=gpt-image-2 responsesModel=gpt-5.5 timeoutMs=480000",
     );
     expect(result.images[0]?.buffer).toEqual(Buffer.from("codex-image"));
   });
@@ -1009,7 +1038,7 @@ describe("openai image generation provider", () => {
     });
 
     expect(logInfoMock).toHaveBeenCalledWith(
-      "image auth selected: provider=openai-codex mode=oauth fakeignored transport=codex-responses requestedModel=gpt-image-2 forged=true next responsesModel=gpt-5.5 timeoutMs=180000",
+      "image auth selected: provider=openai-codex mode=oauth fakeignored transport=codex-responses requestedModel=gpt-image-2 forged=true next responsesModel=gpt-5.5 timeoutMs=480000",
     );
   });
 
@@ -1031,8 +1060,8 @@ describe("openai image generation provider", () => {
     expect(result.images).toEqual([
       {
         buffer: Buffer.from("codex-completed-image"),
-        mimeType: "image/png",
-        fileName: "image-1.png",
+        mimeType: "image/jpeg",
+        fileName: "image-1.jpg",
         revisedPrompt: "completed prompt",
       },
     ]);
@@ -1236,8 +1265,10 @@ describe("openai image generation provider", () => {
       type: "image_generation",
       model: "gpt-image-2",
       size: "1024x1024",
+      output_format: "jpeg",
+      output_compression: 90,
     });
-    expect(result.images.map((image) => image.fileName)).toEqual(["image-1.png", "image-2.png"]);
+    expect(result.images.map((image) => image.fileName)).toEqual(["image-1.jpg", "image-2.jpg"]);
   });
 
   it("caps Codex image request count at provider maximum", async () => {
@@ -1255,10 +1286,10 @@ describe("openai image generation provider", () => {
 
     expect(postJsonRequestMock).toHaveBeenCalledTimes(4);
     expect(result.images.map((image) => image.fileName)).toEqual([
-      "image-1.png",
-      "image-2.png",
-      "image-3.png",
-      "image-4.png",
+      "image-1.jpg",
+      "image-2.jpg",
+      "image-3.jpg",
+      "image-4.jpg",
     ]);
   });
 
@@ -1376,6 +1407,8 @@ describe("openai image generation provider", () => {
             prompt: "Azure cat",
             n: 1,
             size: "1024x1024",
+            output_format: "jpeg",
+            output_compression: 90,
           },
           timeoutMs: 600_000,
         }),
