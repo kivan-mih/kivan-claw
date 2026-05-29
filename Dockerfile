@@ -295,6 +295,12 @@ ARG OPENCLAW_DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 # because docker-compose.yml ships with sysbox-runc enabled and cannot pass
 # build args; opt out with --build-arg OPENCLAW_ENABLE_INNER_DOCKER="".
 # Adds ~250MB to the image.
+#
+# containerd.io is pinned to 1.7.28 (ships runc 1.3.0). runc >=1.3.3/1.2.8
+# hardened sysctl writes via a safe-procfs API that rejects sysbox's FUSE-
+# emulated /proc/sys with "unsafe procfs detected", which breaks every inner
+# container (Docker sets net.ipv4.ip_unprivileged_port_start on all of them).
+# Un-pin once sysbox supports the newer runc: nestybox/sysbox#973.
 ARG OPENCLAW_ENABLE_INNER_DOCKER="1"
 ARG OPENCLAW_INNER_DOCKER_GPG_FINGERPRINT="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,sharing=locked \
@@ -321,7 +327,8 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
         "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.list && \
       apt-get update && \
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+        docker-ce docker-ce-cli containerd.io=1.7.28-1~debian.12~bookworm docker-buildx-plugin docker-compose-plugin && \
+      apt-mark hold containerd.io && \
       groupadd -f docker && usermod -aG docker node && \
       printf 'Defaults:node env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"\nnode ALL=(root) NOPASSWD: /usr/bin/dockerd\n' > /etc/sudoers.d/openclaw-dockerd && \
       chmod 0440 /etc/sudoers.d/openclaw-dockerd && \
