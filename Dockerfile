@@ -323,7 +323,7 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
       groupadd -f docker && usermod -aG docker node && \
-      printf 'node ALL=(root) NOPASSWD: /usr/bin/dockerd\n' > /etc/sudoers.d/openclaw-dockerd && \
+      printf 'Defaults:node env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"\nnode ALL=(root) NOPASSWD: /usr/bin/dockerd\n' > /etc/sudoers.d/openclaw-dockerd && \
       chmod 0440 /etc/sudoers.d/openclaw-dockerd && \
       visudo -cf /etc/sudoers.d/openclaw-dockerd; \
     fi
