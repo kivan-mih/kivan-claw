@@ -968,6 +968,31 @@ export async function runCapability(params: {
     config,
     providerRegistry: params.providerRegistry,
   });
+  // Inbound images are handed to the agent untouched: it can call the on-demand
+  // `image` tool with a context-aware prompt, which beats a generic
+  // pre-description. So when no image model is explicitly configured (capability
+  // or shared models / agent default) and understanding is not force-enabled,
+  // skip pre-describing images and let the agent recognize them on demand. Opt
+  // back in with tools.media.image models, a shared image model, or
+  // tools.media.image.enabled: true.
+  if (
+    capability === "image" &&
+    config?.enabled !== true &&
+    entries.length === 0 &&
+    !hasExplicitImageUnderstandingConfig({ cfg, config })
+  ) {
+    if (shouldLogVerbose()) {
+      logVerbose("Skipping image understanding: deferred to agent (on-demand image tool)");
+    }
+    return {
+      outputs: [],
+      decision: {
+        capability,
+        outcome: "skipped",
+        attachments: selected.map((item) => ({ attachmentIndex: item.index, attempts: [] })),
+      },
+    };
+  }
   let resolvedEntries = entries;
   if (resolvedEntries.length === 0) {
     resolvedEntries = await resolveAutoEntries({
