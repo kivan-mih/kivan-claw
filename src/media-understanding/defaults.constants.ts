@@ -12,14 +12,14 @@ export const DEFAULT_MAX_CHARS_BY_CAPABILITY: Record<
   video: DEFAULT_MAX_CHARS,
 };
 export const DEFAULT_MAX_BYTES: Record<MediaUnderstandingCapability, number> = {
-  image: 10 * MB,
-  audio: 20 * MB,
-  video: 50 * MB,
+  image: 20 * MB,
+  audio: 40 * MB,
+  video: 100 * MB,
 };
 export const DEFAULT_TIMEOUT_SECONDS: Record<MediaUnderstandingCapability, number> = {
-  image: 60,
-  audio: 60,
-  video: 120,
+  image: 180,
+  audio: 180,
+  video: 180,
 };
 export const DEFAULT_PROMPT: Record<MediaUnderstandingCapability, string> = {
   image: "Describe the image.",
