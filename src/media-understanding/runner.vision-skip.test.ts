@@ -369,6 +369,9 @@ describe("runCapability image skip", () => {
           attachments: cache,
           media,
           agentDir: "/tmp",
+          // Image understanding is now deferred to the agent by default; this
+          // exercises the explicit opt-in (enabled) auto-resolution path.
+          config: { enabled: true },
           providerRegistry: new Map([
             [
               "openrouter",
