@@ -1247,4 +1247,67 @@ describe("gateway send mirroring", () => {
     );
     expect(capture.senderIsOwner).toBe(false);
   });
+
+  it("derives agent-scoped media roots for gateway message actions", async () => {
+    const capturedRoots: Array<readonly string[] | undefined> = [];
+    const reactPlugin: ChannelPlugin = {
+      id: "whatsapp",
+      meta: {
+        id: "whatsapp",
+        label: "WhatsApp",
+        selectionLabel: "WhatsApp",
+        docsPath: "/channels/whatsapp",
+        blurb: "WhatsApp media roots test plugin.",
+      },
+      capabilities: { chatTypes: ["direct"], reactions: true },
+      config: {
+        listAccountIds: () => ["default"],
+        resolveAccount: () => ({ enabled: true }),
+        isConfigured: () => true,
+      },
+      actions: {
+        describeMessageTool: () => ({ actions: ["react"] }),
+        supportsAction: ({ action }) => action === "react",
+        handleAction: async ({ mediaLocalRoots }) => {
+          capturedRoots.push(mediaLocalRoots);
+          return jsonResult({ ok: true });
+        },
+      },
+    };
+    mocks.getChannelPlugin.mockReturnValue(reactPlugin);
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "whatsapp", source: "test", plugin: reactPlugin }]),
+      "send-test-media-roots",
+    );
+
+    // Explicit agentId: roots must include that agent's workspace.
+    await runMessageActionRequest({
+      channel: "whatsapp",
+      action: "react",
+      params: { chatJid: "+15551234567", messageId: "wamid.a", emoji: "✅" },
+      agentId: "for_mama",
+      idempotencyKey: "idem-media-roots-agent",
+    });
+    expect(capturedRoots[0]).toContain(TEST_AGENT_WORKSPACE);
+
+    // Agent derived from sessionKey when agentId is omitted.
+    await runMessageActionRequest({
+      channel: "whatsapp",
+      action: "react",
+      params: { chatJid: "+15551234567", messageId: "wamid.b", emoji: "✅" },
+      sessionKey: "agent:for_mama:whatsapp:dm:15551234567",
+      idempotencyKey: "idem-media-roots-session",
+    });
+    expect(capturedRoots[1]).toContain(TEST_AGENT_WORKSPACE);
+
+    // No agent context: plain default roots, no agent workspace appended.
+    await runMessageActionRequest({
+      channel: "whatsapp",
+      action: "react",
+      params: { chatJid: "+15551234567", messageId: "wamid.c", emoji: "✅" },
+      idempotencyKey: "idem-media-roots-default",
+    });
+    expect(capturedRoots[2]).toBeDefined();
+    expect(capturedRoots[2]).not.toContain(TEST_AGENT_WORKSPACE);
+  });
 });

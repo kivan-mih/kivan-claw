@@ -19,6 +19,7 @@ import { buildOutboundSessionContext } from "../../infra/outbound/session-contex
 import { maybeResolveIdLikeTarget } from "../../infra/outbound/target-resolver.js";
 import { resolveOutboundTarget } from "../../infra/outbound/targets.js";
 import { extractToolPayload } from "../../infra/outbound/tool-payload.js";
+import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { normalizePollInput } from "../../polls.js";
 import { parseThreadSessionSuffix } from "../../sessions/session-key-utils.js";
 import {
@@ -339,6 +340,15 @@ export const sendHandlers: GatewayRequestHandlers = {
       return;
     }
 
+    // Media roots are derived server-side from the requesting agent's
+    // identity; roots supplied over the wire are never trusted.
+    const requestAgentId = normalizeOptionalString(request.agentId) ?? undefined;
+    const requestSessionKey = normalizeOptionalString(request.sessionKey) ?? undefined;
+    const effectiveAgentId =
+      requestAgentId ??
+      (requestSessionKey
+        ? resolveSessionAgentId({ sessionKey: requestSessionKey, config: cfg })
+        : undefined);
     const work = (async (): Promise<InflightResult> => {
       try {
         const handled = await dispatchChannelMessageAction({
@@ -349,9 +359,10 @@ export const sendHandlers: GatewayRequestHandlers = {
           accountId: normalizeOptionalString(request.accountId) ?? undefined,
           requesterSenderId: normalizeOptionalString(request.requesterSenderId) ?? undefined,
           senderIsOwner,
-          sessionKey: normalizeOptionalString(request.sessionKey) ?? undefined,
+          sessionKey: requestSessionKey,
           sessionId: normalizeOptionalString(request.sessionId) ?? undefined,
-          agentId: normalizeOptionalString(request.agentId) ?? undefined,
+          agentId: requestAgentId,
+          mediaLocalRoots: getAgentScopedMediaLocalRoots(cfg, effectiveAgentId),
           toolContext: request.toolContext,
           dryRun: false,
         });
