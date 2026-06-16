@@ -100,4 +100,33 @@ describe("readSubagentOutput", () => {
       "Mapped the code path.",
     );
   });
+
+  it("does not surface a raw tool-result body when the subagent ends tool-only", async () => {
+    // OpenAI/ChatGPT subagent runs often end on a tool call with no final
+    // assistant text. The last tool result must never be surfaced as the child
+    // reply (it would dump a raw Read/search body into the user's chat).
+    installOutputDeps({
+      messages: [
+        {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [{ type: "toolCall", id: "call-read", name: "read", arguments: {} }],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call-read",
+          toolName: "read",
+          content: [
+            {
+              type: "text",
+              text: "RAW FILE BODY LINE 1\nRAW FILE BODY LINE 2\nRAW FILE BODY LINE 3",
+            },
+          ],
+        },
+      ],
+      latestAssistantReply: "",
+    });
+
+    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
+  });
 });

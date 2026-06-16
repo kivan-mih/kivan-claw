@@ -300,7 +300,12 @@ function selectSubagentOutputText(
   if (partialProgress) {
     return partialProgress;
   }
-  return snapshot.latestRawText;
+  // Never surface latestRawText (a raw tool-result body, e.g. a Read body or a
+  // search dump) as a child reply. Providers whose runs end on a tool call with
+  // no final assistant text (e.g. OpenAI/Codex) would otherwise leak that blob
+  // into the user's chat. The announce flow substitutes a short status note when
+  // there is no usable textual reply.
+  return undefined;
 }
 
 export async function readSubagentOutput(

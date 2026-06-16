@@ -558,10 +558,15 @@ describe("subagent announce formatting", () => {
   });
 
   it.each([
-    { role: "toolResult", toolOutput: "tool output line 1", childRunId: "run-tool-fallback-1" },
+    {
+      role: "toolResult",
+      // A Read-body-sized blob must never reach the chat.
+      toolOutput: `RAW FILE BODY ${"x".repeat(2000)}`,
+      childRunId: "run-tool-fallback-1",
+    },
     { role: "tool", toolOutput: "tool output line 2", childRunId: "run-tool-fallback-2" },
   ] as const)(
-    "falls back to latest $role output when assistant reply is empty",
+    "does not surface raw $role output when assistant reply is empty; announces a status note instead",
     async (testCase) => {
       chatHistoryMock.mockResolvedValueOnce({
         messages: [
@@ -588,7 +593,8 @@ describe("subagent announce formatting", () => {
 
       const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
       const msg = call?.params?.message as string;
-      expect(msg).toContain(testCase.toolOutput);
+      expect(msg).not.toContain(testCase.toolOutput);
+      expect(msg).toContain("without a written summary");
     },
   );
 
@@ -1931,7 +1937,7 @@ describe("subagent announce formatting", () => {
     expect(msg).not.toContain("old tool output");
   });
 
-  it("falls back to latest tool output for completion-mode when assistant output is empty", async () => {
+  it("does not surface raw tool output for completion-mode when assistant output is empty", async () => {
     chatHistoryMock.mockResolvedValueOnce({
       messages: [
         {
@@ -1961,7 +1967,8 @@ describe("subagent announce formatting", () => {
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message as string;
-    expect(msg).toContain("tool output only");
+    expect(msg).not.toContain("tool output only");
+    expect(msg).toContain("without a written summary");
   });
 
   it("ignores user text when deriving fallback completion output", async () => {
@@ -1990,7 +1997,7 @@ describe("subagent announce formatting", () => {
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = agentSpy.mock.calls[0]?.[0] as { params?: { message?: string } };
     const msg = call?.params?.message as string;
-    expect(msg).toContain("(no output)");
+    expect(msg).toContain("without a written summary");
     expect(msg).not.toContain("user prompt should not be announced");
   });
 
