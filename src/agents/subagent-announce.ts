@@ -479,7 +479,11 @@ export async function runSubagentAnnounceFlow(params: {
 
     const taskLabel = params.label || params.task || "task";
     const announceSessionId = childSessionId || "unknown";
-    const findings = childCompletionFindings || reply || "(no output)";
+    // When the subagent produced no usable textual reply (e.g. an OpenAI/Codex
+    // run that ended on a tool call), announce a short status note rather than a
+    // raw tool-result body — selectSubagentOutputText no longer surfaces one.
+    const noUsableReplyNote = "(Subagent finished without a written summary.)";
+    const findings = childCompletionFindings || reply || noUsableReplyNote;
 
     let requesterIsSubagent = requesterIsInternalSession();
     if (requesterIsSubagent) {
