@@ -438,6 +438,8 @@ export type AgentDefaultsConfig = {
     announceTimeoutMs?: number;
     /** Require explicit agentId in sessions_spawn (no default same-as-caller). Default: false. */
     requireAgentId?: boolean;
+    /** Send a lightweight start/finish status ping to the originating chat for each subagent (status + name + level only; never result text). Default: true. */
+    notifyActivity?: boolean;
   };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: AgentSandboxConfig;

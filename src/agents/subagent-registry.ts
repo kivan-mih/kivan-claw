@@ -18,6 +18,7 @@ import { importRuntimeModule } from "../shared/runtime-import.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import type { ensureRuntimePluginsLoaded as ensureRuntimePluginsLoadedFn } from "./runtime-plugins.js";
+import { notifySubagentActivity } from "./subagent-activity-notify.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
 import { resetAnnounceQueuesForTests } from "./subagent-announce-queue.js";
 import {
@@ -567,6 +568,8 @@ const subagentLifecycleController = createSubagentRegistryLifecycleController({
   cleanupBrowserSessionsForLifecycleEnd: (args) =>
     subagentRegistryDeps.cleanupBrowserSessionsForLifecycleEnd(args),
   runSubagentAnnounceFlow: (params) => subagentRegistryDeps.runSubagentAnnounceFlow(params),
+  getRuntimeConfig: () => subagentRegistryDeps.getRuntimeConfig(),
+  notifySubagentActivity,
   warn: (message, meta) => log.warn(message, meta),
 });
 

@@ -19,6 +19,7 @@ import {
   normalizeSpawnedRunMetadata,
   resolveSpawnedWorkspaceInheritance,
 } from "./spawned-context.js";
+import { notifySubagentActivity } from "./subagent-activity-notify.js";
 import {
   decodeStrictBase64,
   materializeSubagentAttachments,
@@ -1288,6 +1289,20 @@ export async function spawnSubagentDirect(
       // Spawn should still return accepted if spawn lifecycle hooks fail.
     }
   }
+
+  // Best-effort start ping to the originating user chat (status + name + level only).
+  // Fire-and-forget: never delays the accepted response; no-ops silently when there
+  // is no deliverable external origin (nested/cron/background).
+  void notifySubagentActivity({
+    cfg,
+    phase: "start",
+    level: childDepth,
+    label: label || undefined,
+    task,
+    origin: requesterOrigin,
+    childSessionKey,
+    childRunId,
+  });
 
   // Emit lifecycle event so the gateway can broadcast sessions.changed to SSE subscribers.
   emitSessionLifecycleEvent({

@@ -474,7 +474,7 @@ describe("subagent announce timeout config", () => {
       }>) ?? [];
     expect(internalEvents[0]?.status).toBe("error");
     expect(internalEvents[0]?.statusLabel).toContain("All models failed");
-    expect(internalEvents[0]?.result).toBe("(no output)");
+    expect(internalEvents[0]?.result).toBe("(Subagent finished without a written summary.)");
     expect(directAgentCall?.params?.message).not.toContain("stale");
     expect(directAgentCall?.params?.message).not.toContain("older fallback");
   });

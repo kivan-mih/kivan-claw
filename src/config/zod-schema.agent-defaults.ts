@@ -284,6 +284,12 @@ export const AgentDefaultsSchema = z
         runTimeoutSeconds: z.number().int().min(0).optional(),
         announceTimeoutMs: z.number().int().positive().optional(),
         requireAgentId: z.boolean().optional(),
+        notifyActivity: z
+          .boolean()
+          .optional()
+          .describe(
+            "Send a lightweight start/finish status ping to the originating chat for each subagent (status + name + level only; never result text). Default: true.",
+          ),
       })
       .strict()
       .optional(),

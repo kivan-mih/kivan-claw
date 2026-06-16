@@ -69,6 +69,8 @@ export type SubagentRunRecord = {
   fallbackFrozenResultCapturedAt?: number;
   /** Set after the subagent_ended hook has been emitted successfully once. */
   endedHookEmittedAt?: number;
+  /** Set after the one-time subagent finish activity ping has been attempted. */
+  activityFinishNotifiedAt?: number;
   /** Durable marker that final user delivery still needs a retry/resume pass. */
   pendingFinalDelivery?: boolean;
   pendingFinalDeliveryCreatedAt?: number;
