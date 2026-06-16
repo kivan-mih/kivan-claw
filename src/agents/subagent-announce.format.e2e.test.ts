@@ -470,6 +470,22 @@ describe("subagent announce formatting", () => {
     expect(call?.params?.internalEvents?.[0]?.taskLabel).toBe("do thing");
   });
 
+  it("never uses a direct send path for completion (regression: c20fe0346d)", async () => {
+    // Completion results must flow through the parent-agent (agent method), never a
+    // direct send. The subagent activity pings live outside this flow; the result
+    // delivery here must stay send-free.
+    await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:test",
+      childRunId: "run-no-send",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      requesterOrigin: { channel: "telegram", to: "telegram:1", accountId: "a" },
+      ...defaultOutcomeAnnounce,
+      expectsCompletionMessage: true,
+    });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
   it("includes success status when outcome is ok", async () => {
     // Use waitForCompletion: false so it uses the provided outcome instead of calling agent.wait
     await runSubagentAnnounceFlow({

@@ -1,5 +1,6 @@
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import type { cleanupBrowserSessionsForLifecycleEnd } from "../browser-lifecycle-cleanup.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { callGateway as defaultCallGateway } from "../gateway/call.js";
 import { formatErrorMessage, readErrorName } from "../infra/errors.js";
 import { defaultRuntime } from "../runtime.js";
@@ -14,6 +15,7 @@ import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import { retireSessionMcpRuntimeForSessionKey } from "./pi-bundle-mcp-tools.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import { type SubagentRunOutcome, withSubagentOutcomeTiming } from "./subagent-announce-output.js";
+import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import {
   SUBAGENT_ENDED_REASON_COMPLETE,
   type SubagentLifecycleEndedReason,
@@ -36,6 +38,9 @@ import {
 } from "./subagent-registry-helpers.js";
 import type { PendingFinalDeliveryPayload, SubagentRunRecord } from "./subagent-registry.types.js";
 import { deleteSubagentSessionForCleanup } from "./subagent-session-cleanup.js";
+
+type NotifySubagentActivity =
+  (typeof import("./subagent-activity-notify.js"))["notifySubagentActivity"];
 
 type CaptureSubagentCompletionReply =
   (typeof import("./subagent-announce.js"))["captureSubagentCompletionReply"];
@@ -84,9 +89,48 @@ export function createSubagentRegistryLifecycleController(params: {
   captureSubagentCompletionReply: CaptureSubagentCompletionReply;
   cleanupBrowserSessionsForLifecycleEnd?: typeof cleanupBrowserSessionsForLifecycleEnd;
   runSubagentAnnounceFlow: RunSubagentAnnounceFlow;
+  getRuntimeConfig(): OpenClawConfig;
+  notifySubagentActivity: NotifySubagentActivity;
   warn(message: string, meta?: Record<string, unknown>): void;
 }) {
   const scheduledResumeTimers = new Set<ReturnType<typeof setTimeout>>();
+  const activityFinishInFlightRunIds = new Set<string>();
+
+  // Fire the subagent finish ping at most once per run, surviving completeSubagentRun
+  // re-entry (kill→complete reset, resume loops) — mirrors the endedHookEmittedAt guard.
+  const maybeSendActivityFinishPing = async (entry: SubagentRunRecord): Promise<void> => {
+    const runId = entry.runId.trim();
+    if (!runId || entry.activityFinishNotifiedAt || activityFinishInFlightRunIds.has(runId)) {
+      return;
+    }
+    activityFinishInFlightRunIds.add(runId);
+    try {
+      const cfg = params.getRuntimeConfig();
+      const level = getSubagentDepthFromSessionStore(entry.childSessionKey, { cfg });
+      await params.notifySubagentActivity({
+        cfg,
+        phase: "finish",
+        level,
+        label: entry.label,
+        task: entry.task,
+        origin: entry.requesterOrigin,
+        childSessionKey: entry.childSessionKey,
+        childRunId: entry.runId,
+      });
+      // Mark notified regardless of delivery: a no-op (no external origin / disabled)
+      // will not become deliverable later for this same run, and we want at most one attempt.
+      entry.activityFinishNotifiedAt = Date.now();
+      params.persist();
+    } catch (err) {
+      params.warn("failed to send subagent finish activity ping", {
+        err,
+        runId: entry.runId,
+        childSessionKey: entry.childSessionKey,
+      });
+    } finally {
+      activityFinishInFlightRunIds.delete(runId);
+    }
+  };
 
   const scheduleResumeSubagentRun = (runId: string, entry: SubagentRunRecord, delayMs: number) => {
     const timer = setTimeout(() => {
@@ -863,6 +907,12 @@ export function createSubagentRegistryLifecycleController(params: {
     }
 
     const suppressedForSteerRestart = params.suppressAnnounceForSteerRestart(entry);
+    // Best-effort "subagent finished" ping (status + name + level only). Lives here, outside
+    // runSubagentAnnounceFlow, so it fires on every real completion even when the result
+    // announce is skipped (ANNOUNCE_SKIP / NO_REPLY / silent). Steer-restart is not a finish.
+    if (!suppressedForSteerRestart) {
+      await maybeSendActivityFinishPing(entry);
+    }
     if (mutated && !suppressedForSteerRestart) {
       emitSessionLifecycleEvent({
         sessionKey: entry.childSessionKey,

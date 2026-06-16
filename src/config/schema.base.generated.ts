@@ -5718,6 +5718,11 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                   requireAgentId: {
                     type: "boolean",
                   },
+                  notifyActivity: {
+                    description:
+                      "Send a lightweight start/finish status ping to the originating chat for each subagent (status + name + level only; never result text). Default: true.",
+                    type: "boolean",
+                  },
                 },
                 additionalProperties: false,
               },

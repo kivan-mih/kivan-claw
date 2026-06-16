@@ -72,6 +72,10 @@ vi.mock("./subagent-announce.js", () => ({
   runSubagentAnnounceFlow: vi.fn(async () => false),
 }));
 
+vi.mock("./subagent-depth.js", () => ({
+  getSubagentDepthFromSessionStore: () => 1,
+}));
+
 vi.mock("./subagent-registry-cleanup.js", () => ({
   resolveCleanupCompletionReason: () => SUBAGENT_ENDED_REASON_COMPLETE,
   resolveDeferredCleanupDecision: () => ({ kind: "give-up", reason: "retry-limit" }),
@@ -128,6 +132,8 @@ function createLifecycleController({
       (await gatewayMocks.callGateway(opts)) as T,
     captureSubagentCompletionReply: vi.fn(async () => "final completion reply"),
     runSubagentAnnounceFlow: vi.fn(async () => true),
+    getRuntimeConfig: (() => ({})) as LifecycleControllerParams["getRuntimeConfig"],
+    notifySubagentActivity: vi.fn(async () => true),
     warn: vi.fn(),
   };
   Object.assign(params, overrides);
@@ -772,5 +778,91 @@ describe("subagent registry lifecycle hardening", () => {
       browserLifecycleCleanupMocks.cleanupBrowserSessionsForLifecycleEnd,
     ).not.toHaveBeenCalled();
     expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
+  });
+});
+
+describe("subagent finish activity ping", () => {
+  const externalOrigin = { channel: "telegram", to: "telegram:9", accountId: "a" };
+
+  it("sends a level-tagged finish ping to the originating chat once", async () => {
+    const notify = vi.fn(async () => true);
+    const entry = createRunEntry({ requesterOrigin: externalOrigin, label: "research-helper" });
+    const controller = createLifecycleController({ entry, notifySubagentActivity: notify });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "finish",
+        level: 1,
+        label: "research-helper",
+        origin: externalOrigin,
+        childSessionKey: "agent:main:subagent:child",
+        childRunId: entry.runId,
+      }),
+    );
+    expect(entry.activityFinishNotifiedAt).toBeTypeOf("number");
+  });
+
+  it("fires exactly once across completeSubagentRun re-entry", async () => {
+    const notify = vi.fn(async () => true);
+    const entry = createRunEntry({ requesterOrigin: externalOrigin });
+    const controller = createLifecycleController({ entry, notifySubagentActivity: notify });
+
+    const complete = () =>
+      controller.completeSubagentRun({
+        runId: entry.runId,
+        outcome: { status: "ok" },
+        reason: SUBAGENT_ENDED_REASON_COMPLETE,
+        triggerCleanup: false,
+      });
+    await complete();
+    await complete();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ping on a steer-restart suppression", async () => {
+    const notify = vi.fn(async () => true);
+    const entry = createRunEntry({ requesterOrigin: externalOrigin });
+    const controller = createLifecycleController({
+      entry,
+      notifySubagentActivity: notify,
+      suppressAnnounceForSteerRestart: () => true,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("never breaks completion when the ping rejects (best-effort)", async () => {
+    const notify = vi.fn(async () => {
+      throw new Error("ping boom");
+    });
+    const entry = createRunEntry({ requesterOrigin: externalOrigin });
+    const controller = createLifecycleController({ entry, notifySubagentActivity: notify });
+
+    await expect(
+      controller.completeSubagentRun({
+        runId: entry.runId,
+        outcome: { status: "ok" },
+        reason: SUBAGENT_ENDED_REASON_COMPLETE,
+        triggerCleanup: false,
+      }),
+    ).resolves.toBeUndefined();
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 });
