@@ -98,6 +98,23 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
   const livenessState =
     ctx.state.livenessState === "working" ? derivedWorkingTerminalState : ctx.state.livenessState;
 
+  // A subagent run is one logical run made of multiple attempts: run.ts stitches
+  // compaction-continuation, empty-response, reasoning-only, and tool-use
+  // recovery retries together under a single runId, and pi-agent-core emits
+  // `agent_end` once per attempt. An *intermediate* attempt that produced no
+  // usable final answer (no visible assistant text or an interrupted tool-use
+  // turn, no deterministic side effect, not an error, not a yield) must not be
+  // reported to the requester as a terminal completion — the runner is about to
+  // start another attempt. Flag those ends so requesters (the subagent registry)
+  // can defer completion until the run truly settles. This is intentionally a
+  // superset of run.ts's exact retry conditions: a false positive only delays a
+  // genuinely-terminal empty run by the requester's grace window, never hangs it.
+  const mayContinue =
+    !isError &&
+    ctx.state.yielded !== true &&
+    !hadDeterministicSideEffect &&
+    (!hasAssistantVisibleText || incompleteTerminalAssistant);
+
   if (isError && lastAssistant) {
     const friendlyError = formatAssistantErrorText(lastAssistant, {
       cfg: ctx.params.config,
@@ -203,6 +220,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
         ...terminalMeta,
         ...(livenessState ? { livenessState } : {}),
         ...(replayInvalid ? { replayInvalid } : {}),
+        ...(mayContinue ? { mayContinue: true } : {}),
         endedAt: Date.now(),
       },
     });
@@ -213,6 +231,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext): void | Promise<
         ...terminalMeta,
         ...(livenessState ? { livenessState } : {}),
         ...(replayInvalid ? { replayInvalid } : {}),
+        ...(mayContinue ? { mayContinue: true } : {}),
       },
     });
   };
