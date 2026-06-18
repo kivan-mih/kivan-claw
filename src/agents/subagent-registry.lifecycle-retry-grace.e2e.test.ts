@@ -14,6 +14,7 @@ type LifecycleData = {
   endedAt?: number;
   aborted?: boolean;
   error?: string;
+  mayContinue?: boolean;
 };
 type LifecycleEvent = {
   stream?: string;
@@ -552,5 +553,68 @@ describe("subagent registry lifecycle error grace", () => {
       "Final answer B",
       "Final answer B",
     ]);
+  });
+
+  it("defers a mayContinue end and completes only after the run truly settles", async () => {
+    // An intermediate attempt that compacted without a final answer emits a clean
+    // phase:"end" carrying mayContinue. The runner is about to start another
+    // attempt, so the requester must not be told the subagent completed yet.
+    registerCompletionRun("run-may-continue", "may-continue", "compaction continuation test");
+    setAssistantOutput("agent:main:subagent:may-continue", "Final report after retry");
+
+    emitLifecycleEvent("run-may-continue", {
+      phase: "end",
+      mayContinue: true,
+      endedAt: 1_000,
+    });
+    await flushAsync();
+    expect(getAgentCalls()).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(getAgentCalls()).toHaveLength(0);
+
+    // The continuation attempt starts (same runId) → cancels the deferred completion.
+    emitLifecycleEvent("run-may-continue", { phase: "start", startedAt: 1_050 });
+    await flushAsync();
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(getAgentCalls()).toHaveLength(0);
+
+    // The final attempt produces the real answer (no mayContinue) → completes once.
+    emitLifecycleEvent("run-may-continue", { phase: "end", endedAt: 1_250 });
+    await flushAsync();
+
+    await waitForAgentCallCount(1);
+    expect(readFirstAnnounceOutcome()?.status).toBe("ok");
+    expect(getAgentResultsForChildSession("agent:main:subagent:may-continue")).toEqual([
+      "Final report after retry",
+    ]);
+  });
+
+  it("completes a mayContinue end after the grace window when no continuation follows", async () => {
+    // If the runner does not continue (retry budget exhausted), the deferred
+    // completion must still fire after the grace window so the run never hangs.
+    registerCompletionRun("run-may-continue-final", "may-continue-final", "final settle test");
+    setAssistantOutput("agent:main:subagent:may-continue-final", "Recovered answer");
+
+    emitLifecycleEvent("run-may-continue-final", {
+      phase: "end",
+      mayContinue: true,
+      endedAt: 3_000,
+    });
+    await flushAsync();
+    expect(getAgentCalls()).toHaveLength(0);
+
+    // Must stay deferred up to the grace boundary (no premature completion).
+    await vi.advanceTimersByTimeAsync(14_999);
+    await flushAsync();
+    expect(getAgentCalls()).toHaveLength(0);
+
+    // Crossing the grace boundary finalizes the completion so the run never hangs.
+    await vi.advanceTimersByTimeAsync(1);
+    await flushAsync();
+
+    await waitForAgentCallCount(1);
+    expect(readFirstAnnounceOutcome()?.status).toBe("ok");
   });
 });

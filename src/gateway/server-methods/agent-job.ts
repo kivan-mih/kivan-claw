@@ -15,11 +15,20 @@ const AGENT_RUN_ERROR_RETRY_GRACE_MS = 15_000;
  * final success is about to arrive.
  */
 const AGENT_RUN_TIMEOUT_RETRY_GRACE_MS = 15_000;
+/**
+ * A run can also emit an intermediate clean `end` flagged `mayContinue` when an
+ * attempt produced no usable answer and the embedded runner is about to start
+ * another attempt (compaction-continuation / empty-response / reasoning-only /
+ * tool-use recovery). Hold those briefly so `agent.wait` does not resolve to a
+ * premature "ok" before the run truly settles; a subsequent `start` cancels it.
+ */
+const AGENT_RUN_COMPLETE_RETRY_GRACE_MS = 15_000;
 
 const agentRunCache = new Map<string, AgentRunSnapshot>();
 const agentRunStarts = new Map<string, number>();
 const pendingAgentRunErrors = new Map<string, PendingAgentRunError>();
 const pendingAgentRunTimeouts = new Map<string, PendingAgentRunTerminal>();
+const pendingAgentRunCompletes = new Map<string, PendingAgentRunTerminal>();
 const agentRunWaiterCounts = new Map<string, number>();
 let agentRunListenerStarted = false;
 
@@ -74,9 +83,19 @@ function clearPendingAgentRunTimeout(runId: string) {
   pendingAgentRunTimeouts.delete(runId);
 }
 
+function clearPendingAgentRunComplete(runId: string) {
+  const pending = pendingAgentRunCompletes.get(runId);
+  if (!pending) {
+    return;
+  }
+  clearTimeout(pending.timer);
+  pendingAgentRunCompletes.delete(runId);
+}
+
 function schedulePendingAgentRunError(snapshot: AgentRunSnapshot) {
   clearPendingAgentRunTimeout(snapshot.runId);
   clearPendingAgentRunError(snapshot.runId);
+  clearPendingAgentRunComplete(snapshot.runId);
   const dueAt = Date.now() + AGENT_RUN_ERROR_RETRY_GRACE_MS;
   const timer = setTimeout(() => {
     const pending = pendingAgentRunErrors.get(snapshot.runId);
@@ -93,6 +112,7 @@ function schedulePendingAgentRunError(snapshot: AgentRunSnapshot) {
 function schedulePendingAgentRunTimeout(snapshot: AgentRunSnapshot) {
   clearPendingAgentRunError(snapshot.runId);
   clearPendingAgentRunTimeout(snapshot.runId);
+  clearPendingAgentRunComplete(snapshot.runId);
   const dueAt = Date.now() + AGENT_RUN_TIMEOUT_RETRY_GRACE_MS;
   const timer = setTimeout(() => {
     const pending = pendingAgentRunTimeouts.get(snapshot.runId);
@@ -104,6 +124,23 @@ function schedulePendingAgentRunTimeout(snapshot: AgentRunSnapshot) {
   }, AGENT_RUN_TIMEOUT_RETRY_GRACE_MS);
   timer.unref?.();
   pendingAgentRunTimeouts.set(snapshot.runId, { snapshot, dueAt, timer });
+}
+
+function schedulePendingAgentRunComplete(snapshot: AgentRunSnapshot) {
+  clearPendingAgentRunError(snapshot.runId);
+  clearPendingAgentRunTimeout(snapshot.runId);
+  clearPendingAgentRunComplete(snapshot.runId);
+  const dueAt = Date.now() + AGENT_RUN_COMPLETE_RETRY_GRACE_MS;
+  const timer = setTimeout(() => {
+    const pending = pendingAgentRunCompletes.get(snapshot.runId);
+    if (!pending) {
+      return;
+    }
+    pendingAgentRunCompletes.delete(snapshot.runId);
+    recordAgentRunSnapshot(pending.snapshot);
+  }, AGENT_RUN_COMPLETE_RETRY_GRACE_MS);
+  timer.unref?.();
+  pendingAgentRunCompletes.set(snapshot.runId, { snapshot, dueAt, timer });
 }
 
 function getPendingAgentRunError(runId: string) {
@@ -119,6 +156,17 @@ function getPendingAgentRunError(runId: string) {
 
 function getPendingAgentRunTimeout(runId: string) {
   const pending = pendingAgentRunTimeouts.get(runId);
+  if (!pending) {
+    return undefined;
+  }
+  return {
+    snapshot: pending.snapshot,
+    dueAt: pending.dueAt,
+  };
+}
+
+function getPendingAgentRunComplete(runId: string) {
+  const pending = pendingAgentRunCompletes.get(runId);
   if (!pending) {
     return undefined;
   }
@@ -172,7 +220,9 @@ function ensureAgentRunListener() {
       clearPendingAgentRunError(evt.runId);
       clearPendingAgentRunTimeout(evt.runId);
       // A new start means this run is active again (or retried). Drop stale
-      // terminal snapshots so waiters don't resolve from old state.
+      // terminal snapshots so waiters don't resolve from old state, and cancel a
+      // deferred mayContinue completion — this attempt's end will decide.
+      clearPendingAgentRunComplete(evt.runId);
       agentRunCache.delete(evt.runId);
       return;
     }
@@ -193,8 +243,16 @@ function ensureAgentRunListener() {
       schedulePendingAgentRunTimeout(snapshot);
       return;
     }
+    if (evt.data?.mayContinue === true) {
+      // Intermediate attempt end with no usable answer; the runner may start
+      // another attempt. Defer caching the terminal snapshot so a fresh waiter
+      // does not resolve to a premature "ok" before the run truly settles.
+      schedulePendingAgentRunComplete(snapshot);
+      return;
+    }
     clearPendingAgentRunError(evt.runId);
     clearPendingAgentRunTimeout(evt.runId);
+    clearPendingAgentRunComplete(evt.runId);
     recordAgentRunSnapshot(snapshot);
   });
 }
@@ -241,6 +299,7 @@ export async function waitForAgentJob(params: {
     let settled = false;
     let pendingErrorTimer: NodeJS.Timeout | undefined;
     let pendingTimeoutTimer: NodeJS.Timeout | undefined;
+    let pendingCompleteTimer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
     let removeWaiter = () => {};
 
@@ -260,6 +319,14 @@ export async function waitForAgentJob(params: {
       pendingTimeoutTimer = undefined;
     };
 
+    const clearPendingCompleteTimer = () => {
+      if (!pendingCompleteTimer) {
+        return;
+      }
+      clearTimeout(pendingCompleteTimer);
+      pendingCompleteTimer = undefined;
+    };
+
     const finish = (entry: AgentRunSnapshot | null) => {
       if (settled) {
         return;
@@ -268,6 +335,7 @@ export async function waitForAgentJob(params: {
       clearTimeout(timer);
       clearPendingErrorTimer();
       clearPendingTimeoutTimer();
+      clearPendingCompleteTimer();
       unsubscribe();
       removeWaiter();
       if (onAbort) {
@@ -277,12 +345,13 @@ export async function waitForAgentJob(params: {
     };
 
     const scheduleTerminalFinish = (
-      kind: "error" | "timeout",
+      kind: "error" | "timeout" | "complete",
       snapshot: AgentRunSnapshot,
       delayMs: number,
     ) => {
       clearPendingErrorTimer();
       clearPendingTimeoutTimer();
+      clearPendingCompleteTimer();
       const timerRef = setSafeTimeout(() => {
         const latest = ignoreCachedSnapshot ? undefined : getCachedAgentRun(runId);
         if (latest) {
@@ -295,8 +364,10 @@ export async function waitForAgentJob(params: {
       timerRef.unref?.();
       if (kind === "error") {
         pendingErrorTimer = timerRef;
-      } else {
+      } else if (kind === "timeout") {
         pendingTimeoutTimer = timerRef;
+      } else {
+        pendingCompleteTimer = timerRef;
       }
     };
 
@@ -314,6 +385,13 @@ export async function waitForAgentJob(params: {
       scheduleTerminalFinish("timeout", snapshot, delayMs);
     };
 
+    const scheduleCompleteFinish = (
+      snapshot: AgentRunSnapshot,
+      delayMs = AGENT_RUN_COMPLETE_RETRY_GRACE_MS,
+    ) => {
+      scheduleTerminalFinish("complete", snapshot, delayMs);
+    };
+
     if (!ignoreCachedSnapshot) {
       const pendingError = getPendingAgentRunError(runId);
       if (pendingError) {
@@ -322,6 +400,10 @@ export async function waitForAgentJob(params: {
       const pendingTimeout = getPendingAgentRunTimeout(runId);
       if (pendingTimeout) {
         scheduleTimeoutFinish(pendingTimeout.snapshot, pendingTimeout.dueAt - Date.now());
+      }
+      const pendingComplete = getPendingAgentRunComplete(runId);
+      if (pendingComplete) {
+        scheduleCompleteFinish(pendingComplete.snapshot, pendingComplete.dueAt - Date.now());
       }
     }
 
@@ -336,6 +418,7 @@ export async function waitForAgentJob(params: {
       if (phase === "start") {
         clearPendingErrorTimer();
         clearPendingTimeoutTimer();
+        clearPendingCompleteTimer();
         return;
       }
       if (phase !== "end" && phase !== "error") {
@@ -357,6 +440,13 @@ export async function waitForAgentJob(params: {
       }
       if (snapshot.status === "timeout") {
         scheduleTimeoutFinish(snapshot);
+        return;
+      }
+      if (evt.data?.mayContinue === true) {
+        // Intermediate attempt end: the runner may start another attempt. Defer
+        // resolving so a follow-up `start` can cancel this; if none arrives the
+        // grace window resolves it as ok so the waiter never hangs.
+        scheduleCompleteFinish(snapshot);
         return;
       }
       recordAgentRunSnapshot(snapshot);

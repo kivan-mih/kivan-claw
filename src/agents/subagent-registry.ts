@@ -198,7 +198,21 @@ const LIFECYCLE_ERROR_RETRY_GRACE_MS = 15_000;
  * `timed out` completion right before the eventual success.
  */
 const LIFECYCLE_TIMEOUT_RETRY_GRACE_MS = 15_000;
-/** Absolute TTL for orphaned pendingLifecycleError / pendingLifecycleTimeout entries. */
+/**
+ * A subagent run is one logical run spanning multiple embedded attempts: the
+ * runner stitches compaction-continuation / empty-response / reasoning-only /
+ * tool-use recovery retries together under a single runId, and each attempt
+ * emits its own lifecycle `end`. The emitter flags an *intermediate* attempt's
+ * clean `end` with `mayContinue` when it produced no usable answer. Defer the
+ * completion briefly so a follow-up lifecycle `start` (the next attempt) can
+ * cancel it; if no continuation arrives the run still completes after this
+ * window so it never hangs. Mirrors the error/timeout grace above.
+ */
+const LIFECYCLE_COMPLETE_RETRY_GRACE_MS = 15_000;
+/**
+ * Absolute TTL for orphaned pendingLifecycleError / pendingLifecycleTimeout /
+ * pendingLifecycleComplete entries.
+ */
 const PENDING_LIFECYCLE_TERMINAL_TTL_MS = 5 * 60_000; // 5 minutes
 /** Grace period before treating a "running" subagent without a live run context as stale. */
 const STALE_ACTIVE_SUBAGENT_GRACE_MS = process.env.OPENCLAW_TEST_FAST === "1" ? 1_000 : 60_000;
@@ -368,6 +382,13 @@ const pendingLifecycleTimeoutByRunId = new Map<
     endedAt: number;
   }
 >();
+const pendingLifecycleCompleteByRunId = new Map<
+  string,
+  {
+    timer: NodeJS.Timeout;
+    endedAt: number;
+  }
+>();
 
 function clearPendingLifecycleError(runId: string) {
   const pending = pendingLifecycleErrorByRunId.get(runId);
@@ -401,9 +422,26 @@ function clearAllPendingLifecycleTimeouts() {
   pendingLifecycleTimeoutByRunId.clear();
 }
 
+function clearPendingLifecycleComplete(runId: string) {
+  const pending = pendingLifecycleCompleteByRunId.get(runId);
+  if (!pending) {
+    return;
+  }
+  clearTimeout(pending.timer);
+  pendingLifecycleCompleteByRunId.delete(runId);
+}
+
+function clearAllPendingLifecycleCompletes() {
+  for (const pending of pendingLifecycleCompleteByRunId.values()) {
+    clearTimeout(pending.timer);
+  }
+  pendingLifecycleCompleteByRunId.clear();
+}
+
 function schedulePendingLifecycleError(params: { runId: string; endedAt: number; error?: string }) {
   clearPendingLifecycleTimeout(params.runId);
   clearPendingLifecycleError(params.runId);
+  clearPendingLifecycleComplete(params.runId);
   const timer = setTimeout(() => {
     const pending = pendingLifecycleErrorByRunId.get(params.runId);
     if (!pending || pending.timer !== timer) {
@@ -441,6 +479,7 @@ function schedulePendingLifecycleError(params: { runId: string; endedAt: number;
 function schedulePendingLifecycleTimeout(params: { runId: string; endedAt: number }) {
   clearPendingLifecycleError(params.runId);
   clearPendingLifecycleTimeout(params.runId);
+  clearPendingLifecycleComplete(params.runId);
   const timer = setTimeout(() => {
     const pending = pendingLifecycleTimeoutByRunId.get(params.runId);
     if (!pending || pending.timer !== timer) {
@@ -468,6 +507,42 @@ function schedulePendingLifecycleTimeout(params: { runId: string; endedAt: numbe
   }, LIFECYCLE_TIMEOUT_RETRY_GRACE_MS);
   timer.unref?.();
   pendingLifecycleTimeoutByRunId.set(params.runId, {
+    timer,
+    endedAt: params.endedAt,
+  });
+}
+
+function schedulePendingLifecycleComplete(params: { runId: string; endedAt: number }) {
+  clearPendingLifecycleError(params.runId);
+  clearPendingLifecycleTimeout(params.runId);
+  clearPendingLifecycleComplete(params.runId);
+  const timer = setTimeout(() => {
+    const pending = pendingLifecycleCompleteByRunId.get(params.runId);
+    if (!pending || pending.timer !== timer) {
+      return;
+    }
+    pendingLifecycleCompleteByRunId.delete(params.runId);
+    const entry = subagentRuns.get(params.runId);
+    if (!entry) {
+      return;
+    }
+    if (entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE || entry.outcome?.status === "ok") {
+      return;
+    }
+    void completeSubagentRun({
+      runId: params.runId,
+      endedAt: pending.endedAt,
+      outcome: {
+        status: "ok",
+      },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      sendFarewell: true,
+      accountId: entry.requesterOrigin?.accountId,
+      triggerCleanup: true,
+    });
+  }, LIFECYCLE_COMPLETE_RETRY_GRACE_MS);
+  timer.unref?.();
+  pendingLifecycleCompleteByRunId.set(params.runId, {
     timer,
     endedAt: params.endedAt,
   });
@@ -888,6 +963,11 @@ async function sweepSubagentRuns() {
         clearPendingLifecycleTimeout(runId);
       }
     }
+    for (const [runId, pending] of pendingLifecycleCompleteByRunId.entries()) {
+      if (now - pending.endedAt > PENDING_LIFECYCLE_TERMINAL_TTL_MS) {
+        clearPendingLifecycleComplete(runId);
+      }
+    }
 
     if (mutated) {
       persistSubagentRuns();
@@ -921,6 +1001,9 @@ function ensureListener() {
       if (phase === "start") {
         clearPendingLifecycleError(evt.runId);
         clearPendingLifecycleTimeout(evt.runId);
+        // A new attempt started → the prior attempt's deferred completion is not
+        // terminal after all. Cancel it; this attempt's own end will decide.
+        clearPendingLifecycleComplete(evt.runId);
         const startedAt = typeof evt.data?.startedAt === "number" ? evt.data.startedAt : undefined;
         if (startedAt) {
           entry.startedAt = startedAt;
@@ -966,6 +1049,21 @@ function ensureListener() {
       }
       clearPendingLifecycleError(evt.runId);
       clearPendingLifecycleTimeout(evt.runId);
+      if (evt.data?.mayContinue === true) {
+        // Intermediate attempt end: the embedded runner produced no usable answer
+        // and is about to start another attempt (compaction-continuation,
+        // empty-response, reasoning-only, or tool-use recovery). Do not complete
+        // the run yet — a follow-up lifecycle `start` cancels this deferral, and
+        // if no continuation arrives the grace window completes it so it never
+        // hangs. Without this, the parent is told the subagent finished (with an
+        // empty result) while it is still working.
+        schedulePendingLifecycleComplete({
+          runId: evt.runId,
+          endedAt,
+        });
+        return;
+      }
+      clearPendingLifecycleComplete(evt.runId);
       await completeSubagentRun({
         runId: evt.runId,
         endedAt,
@@ -1041,6 +1139,7 @@ export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   endedHookInFlightRunIds.clear();
   clearAllPendingLifecycleErrors();
   clearAllPendingLifecycleTimeouts();
+  clearAllPendingLifecycleCompletes();
   contextEngineInitLoader.clear();
   contextEngineRegistryLoader.clear();
   runtimePluginsLoader.clear();
@@ -1112,6 +1211,7 @@ export async function finalizeInterruptedSubagentRun(params: {
   for (const runId of runIds) {
     clearPendingLifecycleError(runId);
     clearPendingLifecycleTimeout(runId);
+    clearPendingLifecycleComplete(runId);
     const entry = subagentRuns.get(runId);
     if (!entry || typeof entry.cleanupCompletedAt === "number") {
       continue;

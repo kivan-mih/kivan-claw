@@ -31,6 +31,11 @@ function createContext(
     },
     state: {
       lastAssistant: lastAssistant as EmbeddedPiSubscribeContext["state"]["lastAssistant"],
+      // Default to a normal completed run (a visible assistant reply) so tests
+      // that exercise flush/callback ordering are not incidentally flagged as
+      // mayContinue. Tests covering the "no usable answer" path set
+      // `assistantTexts = []` explicitly.
+      assistantTexts: ["Done."],
       pendingCompactionRetry: 0,
       pendingToolMediaUrls: [],
       pendingToolAudioAsVoice: false,
@@ -260,6 +265,7 @@ describe("handleAgentEnd", () => {
         phase: "end",
         livenessState: "abandoned",
         replayInvalid: true,
+        mayContinue: true,
       },
     });
   });
@@ -285,6 +291,7 @@ describe("handleAgentEnd", () => {
         phase: "end",
         livenessState: "abandoned",
         replayInvalid: true,
+        mayContinue: true,
       },
     });
   });
@@ -313,6 +320,7 @@ describe("handleAgentEnd", () => {
         phase: "end",
         livenessState: "abandoned",
         replayInvalid: true,
+        mayContinue: true,
       },
     });
   });
@@ -334,6 +342,47 @@ describe("handleAgentEnd", () => {
         livenessState: "working",
         replayInvalid: true,
       },
+    });
+  });
+
+  it("marks phase:end with mayContinue when an attempt produced no usable answer", async () => {
+    // The compaction-continuation shape: liveness resolves to "working" (no
+    // replay-invalid, lastAssistant is not a tool-use turn) yet no visible answer
+    // and no side effect were produced. The runner will start another attempt, so
+    // the requester must be told this end may be non-terminal.
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(undefined, { onAgentEvent });
+    ctx.state.livenessState = "working";
+    ctx.state.assistantTexts = [];
+    ctx.state.messagingToolSentTexts = [];
+    ctx.state.messagingToolSentMediaUrls = [];
+    ctx.state.successfulCronAdds = 0;
+
+    await handleAgentEnd(ctx);
+
+    expect(onAgentEvent).toHaveBeenCalledWith({
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        livenessState: "working",
+        mayContinue: true,
+      },
+    });
+  });
+
+  it("does not mark mayContinue when the attempt produced a visible answer", async () => {
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(undefined, { onAgentEvent });
+    ctx.state.assistantTexts = ["Here is the report."];
+    ctx.state.messagingToolSentTexts = [];
+    ctx.state.messagingToolSentMediaUrls = [];
+    ctx.state.successfulCronAdds = 0;
+
+    await handleAgentEnd(ctx);
+
+    expect(onAgentEvent).toHaveBeenCalledWith({
+      stream: "lifecycle",
+      data: { phase: "end" },
     });
   });
 
