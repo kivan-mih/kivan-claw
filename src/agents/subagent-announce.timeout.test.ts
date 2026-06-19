@@ -28,6 +28,10 @@ let shouldIgnorePostCompletion = false;
 let pendingDescendantRuns = 0;
 const isEmbeddedPiRunActiveMock = vi.fn((_sessionId: string) => false);
 const waitForEmbeddedPiRunEndMock = vi.fn(async (_sessionId: string, _timeoutMs?: number) => true);
+const isEmbeddedPiRunLoopActiveMock = vi.fn((_sessionKey?: string) => false);
+const waitForEmbeddedPiRunLoopEndMock = vi.fn(
+  async (_sessionKey?: string, _timeoutMs?: number) => true,
+);
 let fallbackRequesterResolution: {
   requesterSessionKey: string;
   requesterOrigin?: { channel?: string; to?: string; accountId?: string };
@@ -176,9 +180,12 @@ vi.mock("./subagent-announce.runtime.js", () => ({
   resolveStorePath: () => "/tmp/sessions-main.json",
   resolveMainSessionKey: () => "agent:main:main",
   isEmbeddedPiRunActive: (sessionId: string) => isEmbeddedPiRunActiveMock(sessionId),
+  isEmbeddedPiRunLoopActive: (sessionKey: string) => isEmbeddedPiRunLoopActiveMock(sessionKey),
   queueEmbeddedPiMessage: (_sessionId: string, _text: string) => false,
   waitForEmbeddedPiRunEnd: (sessionId: string, timeoutMs?: number) =>
     waitForEmbeddedPiRunEndMock(sessionId, timeoutMs),
+  waitForEmbeddedPiRunLoopEnd: (sessionKey: string, timeoutMs?: number) =>
+    waitForEmbeddedPiRunLoopEndMock(sessionKey, timeoutMs),
 }));
 vi.mock("./subagent-announce.registry.runtime.js", () => ({
   countActiveDescendantRuns: () => 0,
@@ -275,7 +282,19 @@ describe("subagent announce timeout config", () => {
     pendingDescendantRuns = 0;
     isEmbeddedPiRunActiveMock.mockReset().mockReturnValue(false);
     waitForEmbeddedPiRunEndMock.mockReset().mockResolvedValue(true);
+    isEmbeddedPiRunLoopActiveMock.mockReset().mockReturnValue(false);
+    waitForEmbeddedPiRunLoopEndMock.mockReset().mockResolvedValue(true);
     fallbackRequesterResolution = null;
+  });
+
+  it("defers the announce while the whole-run loop is still active", async () => {
+    // Backstop: even on a completion path that reaches the announce, do not tell
+    // the requester the subagent finished while its run loop is still working.
+    isEmbeddedPiRunLoopActiveMock.mockReturnValue(true);
+    waitForEmbeddedPiRunLoopEndMock.mockResolvedValue(false); // loop never settles within the wait
+    const announced = await runAnnounceFlowForTest("run-loop-active-backstop");
+    expect(announced).toBe(false);
+    expect(findFinalDirectAgentCall()).toBeUndefined();
   });
 
   it("uses 120s timeout by default for direct announce agent call", async () => {

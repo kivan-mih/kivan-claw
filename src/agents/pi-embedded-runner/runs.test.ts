@@ -5,15 +5,19 @@ import {
   abortAndDrainEmbeddedPiRun,
   abortEmbeddedPiRun,
   clearActiveEmbeddedRun,
+  clearEmbeddedPiRunLoopActive,
   consumeEmbeddedRunModelSwitch,
   getActiveEmbeddedRunSnapshot,
   isEmbeddedPiRunHandleActive,
+  isEmbeddedPiRunLoopActive,
   queueEmbeddedPiMessage,
   requestEmbeddedRunModelSwitch,
   resolveActiveEmbeddedRunHandleSessionId,
   setActiveEmbeddedRun,
+  setEmbeddedPiRunLoopActive,
   updateActiveEmbeddedRunSnapshot,
   waitForActiveEmbeddedRuns,
+  waitForEmbeddedPiRunLoopEnd,
 } from "./runs.js";
 
 type RunHandle = Parameters<typeof setActiveEmbeddedRun>[1];
@@ -214,6 +218,58 @@ describe("pi-embedded runner run registry", () => {
 
     clearActiveEmbeddedRun("session-snapshot", handle);
     expect(getActiveEmbeddedRunSnapshot("session-snapshot")).toBeUndefined();
+  });
+
+  it("tracks whole-run loop activity by sessionKey and clears only on runId match", () => {
+    expect(isEmbeddedPiRunLoopActive("agent:main:child")).toBe(false);
+
+    setEmbeddedPiRunLoopActive("agent:main:child", "run-1");
+    expect(isEmbeddedPiRunLoopActive("agent:main:child")).toBe(true);
+
+    // A stale clear from a superseded run must not drop the active loop.
+    clearEmbeddedPiRunLoopActive("agent:main:child", "run-0");
+    expect(isEmbeddedPiRunLoopActive("agent:main:child")).toBe(true);
+
+    clearEmbeddedPiRunLoopActive("agent:main:child", "run-1");
+    expect(isEmbeddedPiRunLoopActive("agent:main:child")).toBe(false);
+  });
+
+  it("ignores empty/undefined sessionKeys for loop activity", () => {
+    setEmbeddedPiRunLoopActive(undefined, "run-x");
+    setEmbeddedPiRunLoopActive("", "run-x");
+    expect(isEmbeddedPiRunLoopActive(undefined)).toBe(false);
+    expect(isEmbeddedPiRunLoopActive("")).toBe(false);
+  });
+
+  it("resolves waitForEmbeddedPiRunLoopEnd immediately when no loop is active", async () => {
+    await expect(waitForEmbeddedPiRunLoopEnd("agent:main:idle", 1_000)).resolves.toBe(true);
+  });
+
+  it("resolves waitForEmbeddedPiRunLoopEnd true when the loop clears", async () => {
+    vi.useFakeTimers();
+    try {
+      setEmbeddedPiRunLoopActive("agent:main:waiter", "run-w");
+      const waitPromise = waitForEmbeddedPiRunLoopEnd("agent:main:waiter", 5_000);
+      setTimeout(() => clearEmbeddedPiRunLoopActive("agent:main:waiter", "run-w"), 200);
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(waitPromise).resolves.toBe(true);
+    } finally {
+      await vi.runOnlyPendingTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resolves waitForEmbeddedPiRunLoopEnd false when the loop never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      setEmbeddedPiRunLoopActive("agent:main:stuck", "run-s");
+      const waitPromise = waitForEmbeddedPiRunLoopEnd("agent:main:stuck", 1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(waitPromise).resolves.toBe(false);
+    } finally {
+      await vi.runOnlyPendingTimersAsync();
+      vi.useRealTimers();
+    }
   });
 
   it("stores and consumes pending live model switch requests", () => {

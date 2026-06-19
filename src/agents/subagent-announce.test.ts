@@ -18,6 +18,10 @@ const queueEmbeddedPiMessageMock = vi.fn(
   (_sessionId: string, _text: string, _options?: unknown) => false,
 );
 const waitForEmbeddedPiRunEndMock = vi.fn(async (_sessionId: string, _timeoutMs?: number) => true);
+const isEmbeddedPiRunLoopActiveMock = vi.fn((_sessionKey?: string) => false);
+const waitForEmbeddedPiRunLoopEndMock = vi.fn(
+  async (_sessionKey?: string, _timeoutMs?: number) => true,
+);
 let mockConfig: ReturnType<(typeof import("../config/config.js"))["getRuntimeConfig"]> = {
   session: {
     mainKey: "main",
@@ -41,6 +45,7 @@ const { subagentRegistryRuntimeMock } = vi.hoisted(() => ({
 vi.mock("./subagent-announce.runtime.js", () => ({
   callGateway: (request: unknown) => callGatewayMock(request),
   isEmbeddedPiRunActive: (sessionId: string) => isEmbeddedPiRunActiveMock(sessionId),
+  isEmbeddedPiRunLoopActive: (sessionKey: string) => isEmbeddedPiRunLoopActiveMock(sessionKey),
   getRuntimeConfig: () => mockConfig,
   loadSessionStore: (storePath: string) => loadSessionStoreMock(storePath),
   queueEmbeddedPiMessage: (sessionId: string, text: string, options?: unknown) =>
@@ -51,6 +56,8 @@ vi.mock("./subagent-announce.runtime.js", () => ({
   resolveStorePath: (store: unknown, options: unknown) => resolveStorePathMock(store, options),
   waitForEmbeddedPiRunEnd: (sessionId: string, timeoutMs?: number) =>
     waitForEmbeddedPiRunEndMock(sessionId, timeoutMs),
+  waitForEmbeddedPiRunLoopEnd: (sessionKey: string, timeoutMs?: number) =>
+    waitForEmbeddedPiRunLoopEndMock(sessionKey, timeoutMs),
 }));
 
 vi.mock("./tools/agent-step.js", () => ({
@@ -229,8 +236,10 @@ describe("subagent announce seam flow", () => {
     resolveMainSessionKeyMock.mockReset().mockImplementation(() => "agent:main:main");
     readLatestAssistantReplyMock.mockReset().mockResolvedValue("raw subagent reply");
     isEmbeddedPiRunActiveMock.mockReset().mockReturnValue(false);
+    isEmbeddedPiRunLoopActiveMock.mockReset().mockReturnValue(false);
     queueEmbeddedPiMessageMock.mockReset().mockReturnValue(false);
     waitForEmbeddedPiRunEndMock.mockReset().mockResolvedValue(true);
+    waitForEmbeddedPiRunLoopEndMock.mockReset().mockResolvedValue(true);
     mockConfig = {
       session: {
         mainKey: "main",

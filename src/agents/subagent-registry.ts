@@ -17,6 +17,10 @@ import { createLazyImportLoader, createLazyPromiseLoader } from "../shared/lazy-
 import { importRuntimeModule } from "../shared/runtime-import.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import {
+  isEmbeddedPiRunLoopActive,
+  waitForEmbeddedPiRunLoopEnd,
+} from "./pi-embedded-runner/runs.js";
 import type { ensureRuntimePluginsLoaded as ensureRuntimePluginsLoadedFn } from "./runtime-plugins.js";
 import { notifySubagentActivity } from "./subagent-activity-notify.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
@@ -94,6 +98,8 @@ type SubagentRegistryDeps = {
   cleanupBrowserSessionsForLifecycleEnd: typeof cleanupBrowserSessionsForLifecycleEnd;
   getSubagentRunsSnapshotForRead: typeof getSubagentRunsSnapshotForRead;
   getRuntimeConfig: typeof getRuntimeConfig;
+  isEmbeddedPiRunLoopActive: typeof isEmbeddedPiRunLoopActive;
+  waitForEmbeddedPiRunLoopEnd: typeof waitForEmbeddedPiRunLoopEnd;
   onAgentEvent: typeof onAgentEvent;
   persistSubagentRunsToDisk: typeof persistSubagentRunsToDisk;
   resolveAgentTimeoutMs: typeof resolveAgentTimeoutMs;
@@ -132,6 +138,8 @@ const defaultSubagentRegistryDeps: SubagentRegistryDeps = {
     (await loadCleanupBrowserSessionsForLifecycleEnd())(params),
   getSubagentRunsSnapshotForRead,
   getRuntimeConfig,
+  isEmbeddedPiRunLoopActive,
+  waitForEmbeddedPiRunLoopEnd,
   onAgentEvent,
   persistSubagentRunsToDisk,
   resolveAgentTimeoutMs,
@@ -529,22 +537,69 @@ function schedulePendingLifecycleComplete(params: { runId: string; endedAt: numb
     if (entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE || entry.outcome?.status === "ok") {
       return;
     }
-    void completeSubagentRun({
+    void completeTerminalRunWhenLoopSettled({
       runId: params.runId,
+      childSessionKey: entry.childSessionKey,
       endedAt: pending.endedAt,
-      outcome: {
-        status: "ok",
-      },
-      reason: SUBAGENT_ENDED_REASON_COMPLETE,
-      sendFarewell: true,
       accountId: entry.requesterOrigin?.accountId,
-      triggerCleanup: true,
     });
   }, LIFECYCLE_COMPLETE_RETRY_GRACE_MS);
   timer.unref?.();
   pendingLifecycleCompleteByRunId.set(params.runId, {
     timer,
     endedAt: params.endedAt,
+  });
+}
+
+/**
+ * Complete a terminal subagent run, but only once its embedded run loop has
+ * actually settled.
+ *
+ * A lifecycle `end` is emitted per *attempt*, before the runner decides whether
+ * to start another attempt, so an intermediate attempt's end can look terminal
+ * (e.g. `mayContinue` was mis-derived, or the grace window expired during a long
+ * compaction). The whole-run loop flag (set for the entire `runEmbeddedPiAgent`
+ * loop, keyed by sessionKey) is authoritative: if it is still active, either this
+ * is the true final end — the runner's `finally` clears the flag within a few ms,
+ * so we await that and complete promptly — or the run is still looping, so the
+ * wait times out and we defer, never reporting the run finished while it works.
+ */
+async function completeTerminalRunWhenLoopSettled(params: {
+  runId: string;
+  childSessionKey: string;
+  endedAt: number;
+  accountId?: string;
+}): Promise<void> {
+  if (subagentRegistryDeps.isEmbeddedPiRunLoopActive(params.childSessionKey)) {
+    const settled = await subagentRegistryDeps.waitForEmbeddedPiRunLoopEnd(
+      params.childSessionKey,
+      LIFECYCLE_COMPLETE_RETRY_GRACE_MS,
+    );
+    if (!settled || subagentRegistryDeps.isEmbeddedPiRunLoopActive(params.childSessionKey)) {
+      // Still looping → this end was not actually terminal. Defer; the run's real
+      // final end (or this re-armed grace window) completes it once the loop ends.
+      schedulePendingLifecycleComplete({ runId: params.runId, endedAt: params.endedAt });
+      return;
+    }
+  }
+  clearPendingLifecycleComplete(params.runId);
+  // Idempotent: several deferred/awaited paths can wake on the same loop-end.
+  const current = subagentRuns.get(params.runId);
+  if (
+    !current ||
+    current.endedReason === SUBAGENT_ENDED_REASON_COMPLETE ||
+    current.outcome?.status === "ok"
+  ) {
+    return;
+  }
+  await completeSubagentRun({
+    runId: params.runId,
+    endedAt: params.endedAt,
+    outcome: { status: "ok" },
+    reason: SUBAGENT_ENDED_REASON_COMPLETE,
+    sendFarewell: true,
+    accountId: params.accountId,
+    triggerCleanup: true,
   });
 }
 
@@ -832,7 +887,14 @@ async function sweepSubagentRuns() {
     let mutated = false;
     for (const [runId, entry] of subagentRuns.entries()) {
       if (typeof entry.endedAt !== "number") {
-        const hasLiveRunContext = Boolean(getAgentRunContext(runId));
+        // The whole-run loop flag keeps a still-looping run from being swept as a
+        // stale orphan during inter-attempt gaps (when the per-attempt run context
+        // is momentarily absent). Without this, a deferred completion leaves the
+        // run with no endedAt and the sweeper force-fails it as "lost active
+        // execution context" while it is still working.
+        const hasLiveRunContext =
+          Boolean(getAgentRunContext(runId)) ||
+          subagentRegistryDeps.isEmbeddedPiRunLoopActive(entry.childSessionKey);
         const activeAgeMs = now - (entry.startedAt ?? entry.createdAt);
         if (!hasLiveRunContext && activeAgeMs >= STALE_ACTIVE_SUBAGENT_GRACE_MS) {
           const orphanReason = resolveSubagentRunOrphanReason({
@@ -1063,15 +1125,14 @@ function ensureListener() {
         });
         return;
       }
-      clearPendingLifecycleComplete(evt.runId);
-      await completeSubagentRun({
+      // `mayContinue` was not set, but the per-attempt lifecycle `end` can still
+      // be intermediate (mis-derived flag, or a continuation after a slow gap).
+      // Only complete once the whole-run loop has actually settled.
+      await completeTerminalRunWhenLoopSettled({
         runId: evt.runId,
+        childSessionKey: entry.childSessionKey,
         endedAt,
-        outcome: { status: "ok" },
-        reason: SUBAGENT_ENDED_REASON_COMPLETE,
-        sendFarewell: true,
         accountId: entry.requesterOrigin?.accountId,
-        triggerCleanup: true,
       });
     })();
   });

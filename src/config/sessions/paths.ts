@@ -268,6 +268,7 @@ export function resolveSessionFilePath(
   sessionId: string,
   entry?: { sessionFile?: string },
   opts?: SessionFilePathOptions,
+  topicId?: string | number,
 ): string {
   const sessionsDir = resolveSessionsDir(opts);
   const candidate = entry?.sessionFile?.trim();
@@ -278,7 +279,10 @@ export function resolveSessionFilePath(
       // Keep handlers alive when persisted metadata is stale/corrupt.
     }
   }
-  return resolveSessionTranscriptPathInDir(sessionId, sessionsDir);
+  // Without a persisted sessionFile, reconstruct the filename. Thread the topic id
+  // through so topic/thread sessions resolve to their real `*-topic-<id>.jsonl`
+  // file instead of the bare `<sessionId>.jsonl` (which does not exist on disk).
+  return resolveSessionTranscriptPathInDir(sessionId, sessionsDir, topicId);
 }
 
 const GENERATED_UUID_SESSION_FILE_RE =

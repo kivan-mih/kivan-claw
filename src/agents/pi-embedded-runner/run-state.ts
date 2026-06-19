@@ -44,6 +44,13 @@ const embeddedRunState = resolveGlobalSingleton(EMBEDDED_RUN_STATE_KEY, () => ({
   sessionIdsByKey: new Map<string, string>(),
   waiters: new Map<string, Set<EmbeddedRunWaiter>>(),
   modelSwitchRequests: new Map<string, EmbeddedRunModelSwitchRequest>(),
+  // Whole-run loop activity, keyed by sessionKey -> owning runId. Unlike
+  // `activeRuns` (which is set/cleared per *attempt*), this stays set for the
+  // entire `runEmbeddedPiAgent` loop so completion gates can tell a run is still
+  // working across inter-attempt gaps (compaction / retry prep). sessionKey is
+  // used (not sessionId) because compaction can rotate the sessionId mid-run.
+  runLoops: new Map<string, string>(),
+  runLoopWaiters: new Map<string, Set<EmbeddedRunWaiter>>(),
 }));
 
 export const ACTIVE_EMBEDDED_RUNS =
@@ -61,6 +68,11 @@ export const EMBEDDED_RUN_WAITERS =
 export const EMBEDDED_RUN_MODEL_SWITCH_REQUESTS =
   embeddedRunState.modelSwitchRequests ??
   (embeddedRunState.modelSwitchRequests = new Map<string, EmbeddedRunModelSwitchRequest>());
+export const ACTIVE_EMBEDDED_RUN_LOOPS =
+  embeddedRunState.runLoops ?? (embeddedRunState.runLoops = new Map<string, string>());
+export const EMBEDDED_RUN_LOOP_WAITERS =
+  embeddedRunState.runLoopWaiters ??
+  (embeddedRunState.runLoopWaiters = new Map<string, Set<EmbeddedRunWaiter>>());
 
 export function getActiveEmbeddedRunCount(): number {
   let activeCount = ACTIVE_EMBEDDED_RUNS.size;

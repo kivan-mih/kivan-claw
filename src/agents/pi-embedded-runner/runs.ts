@@ -20,8 +20,10 @@ import {
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import {
   ACTIVE_EMBEDDED_RUNS,
+  ACTIVE_EMBEDDED_RUN_LOOPS,
   ACTIVE_EMBEDDED_RUN_SESSION_IDS_BY_KEY,
   ACTIVE_EMBEDDED_RUN_SNAPSHOTS,
+  EMBEDDED_RUN_LOOP_WAITERS,
   EMBEDDED_RUN_MODEL_SWITCH_REQUESTS,
   EMBEDDED_RUN_WAITERS,
   getActiveEmbeddedRunCount,
@@ -356,6 +358,113 @@ function notifyEmbeddedRunEnded(sessionId: string) {
   }
 }
 
+function notifyEmbeddedRunLoopEnded(sessionKey: string) {
+  const waiters = EMBEDDED_RUN_LOOP_WAITERS.get(sessionKey);
+  if (!waiters || waiters.size === 0) {
+    return;
+  }
+  EMBEDDED_RUN_LOOP_WAITERS.delete(sessionKey);
+  diag.debug(`notifying loop waiters: sessionKey=${sessionKey} waiterCount=${waiters.size}`);
+  for (const waiter of waiters) {
+    clearTimeout(waiter.timer);
+    waiter.resolve(true);
+  }
+}
+
+/**
+ * Mark a whole-run loop active for the lifetime of `runEmbeddedPiAgent`.
+ *
+ * Keyed by sessionKey (stable across compaction, which can rotate the sessionId)
+ * so completion gates that only hold the child session key can consult it.
+ * Unlike `setActiveEmbeddedRun` (set/cleared per *attempt*, and cleared before
+ * each attempt's terminal event), this stays set across inter-attempt gaps
+ * (compaction / retry prep) until the run loop's `finally` clears it, so gates
+ * never report a run as finished while its loop is still working.
+ */
+export function setEmbeddedPiRunLoopActive(sessionKey: string | undefined, runId: string): void {
+  const key = sessionKey?.trim();
+  if (!key) {
+    return;
+  }
+  const previous = ACTIVE_EMBEDDED_RUN_LOOPS.get(key);
+  if (previous && previous !== runId) {
+    diag.warn(`run loop replaced: sessionKey=${key} previousRunId=${previous} runId=${runId}`);
+  }
+  ACTIVE_EMBEDDED_RUN_LOOPS.set(key, runId);
+}
+
+/**
+ * Clear a whole-run loop marker. Only clears when the owning runId matches, so a
+ * superseding run that reused the same sessionKey is not cleared by the prior
+ * run's `finally` (mirrors the handle-identity guard in `clearActiveEmbeddedRun`).
+ */
+export function clearEmbeddedPiRunLoopActive(sessionKey: string | undefined, runId: string): void {
+  const key = sessionKey?.trim();
+  if (!key) {
+    return;
+  }
+  if (ACTIVE_EMBEDDED_RUN_LOOPS.get(key) === runId) {
+    ACTIVE_EMBEDDED_RUN_LOOPS.delete(key);
+    notifyEmbeddedRunLoopEnded(key);
+  } else {
+    diag.debug(`run loop clear skipped: sessionKey=${key} reason=runid_mismatch`);
+  }
+}
+
+/**
+ * Whether the whole-run loop is still active for a sessionKey. Intentionally does
+ * NOT consult reply-run state — it reflects only `runEmbeddedPiAgent`'s loop.
+ */
+export function isEmbeddedPiRunLoopActive(sessionKey: string | undefined): boolean {
+  const key = sessionKey?.trim();
+  if (!key) {
+    return false;
+  }
+  return ACTIVE_EMBEDDED_RUN_LOOPS.has(key);
+}
+
+/**
+ * Resolve when the whole-run loop for a sessionKey ends (or immediately if it is
+ * not active). Mirrors `waitForEmbeddedPiRunEnd` but against the run-loop maps.
+ */
+export function waitForEmbeddedPiRunLoopEnd(
+  sessionKey: string | undefined,
+  timeoutMs = 15_000,
+): Promise<boolean> {
+  const key = sessionKey?.trim();
+  if (!key || !ACTIVE_EMBEDDED_RUN_LOOPS.has(key)) {
+    return Promise.resolve(true);
+  }
+  diag.debug(`waiting for run loop end: sessionKey=${key} timeoutMs=${timeoutMs}`);
+  return new Promise((resolve) => {
+    const waiters = EMBEDDED_RUN_LOOP_WAITERS.get(key) ?? new Set<EmbeddedRunWaiter>();
+    const waiter: EmbeddedRunWaiter = {
+      resolve,
+      timer: setTimeout(
+        () => {
+          waiters.delete(waiter);
+          if (waiters.size === 0) {
+            EMBEDDED_RUN_LOOP_WAITERS.delete(key);
+          }
+          diag.warn(`run loop wait timeout: sessionKey=${key} timeoutMs=${timeoutMs}`);
+          resolve(false);
+        },
+        Math.max(100, timeoutMs),
+      ),
+    };
+    waiters.add(waiter);
+    EMBEDDED_RUN_LOOP_WAITERS.set(key, waiters);
+    if (!ACTIVE_EMBEDDED_RUN_LOOPS.has(key)) {
+      waiters.delete(waiter);
+      if (waiters.size === 0) {
+        EMBEDDED_RUN_LOOP_WAITERS.delete(key);
+      }
+      clearTimeout(waiter.timer);
+      resolve(true);
+    }
+  });
+}
+
 export function setActiveEmbeddedRun(
   sessionId: string,
   handle: EmbeddedPiQueueHandle,
@@ -423,6 +532,15 @@ export function forceClearEmbeddedPiRun(
     notifyEmbeddedRunEnded(sessionId);
     cleared = true;
   }
+  // Belt-and-suspenders: stuck-recovery bypasses the run loop's own `finally`,
+  // so drop any whole-run loop marker too (regardless of runId) and release
+  // loop waiters. The loop map is keyed by sessionKey, so only clearable here
+  // when the caller passed one (the run's own `finally` is the primary clear).
+  const loopKey = sessionKey?.trim();
+  if (loopKey && ACTIVE_EMBEDDED_RUN_LOOPS.delete(loopKey)) {
+    notifyEmbeddedRunLoopEnded(loopKey);
+    cleared = true;
+  }
   const cause = new Error(`Embedded run force-cleared by ${reason}`);
   return forceClearReplyRunBySessionId(sessionId, cause) || cleared;
 }
@@ -435,8 +553,16 @@ export const __testing = {
         waiter.resolve(true);
       }
     }
+    for (const waiters of EMBEDDED_RUN_LOOP_WAITERS.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(true);
+      }
+    }
     EMBEDDED_RUN_WAITERS.clear();
+    EMBEDDED_RUN_LOOP_WAITERS.clear();
     ACTIVE_EMBEDDED_RUNS.clear();
+    ACTIVE_EMBEDDED_RUN_LOOPS.clear();
     ACTIVE_EMBEDDED_RUN_SNAPSHOTS.clear();
     ACTIVE_EMBEDDED_RUN_SESSION_IDS_BY_KEY.clear();
     EMBEDDED_RUN_MODEL_SWITCH_REQUESTS.clear();
