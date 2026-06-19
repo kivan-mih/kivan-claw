@@ -57,6 +57,10 @@ let lifecycleHandler: ((evt: LifecycleEvent) => void) | undefined;
 let agentCallPlan: Array<"ok" | "throw"> = [];
 let chatHistoryBySessionKey = new Map<string, Array<Record<string, unknown>>>();
 let sessionStore: Record<string, SessionStoreEntry> = {};
+// Simulated whole-run loop activity, keyed by childSessionKey. The registry's
+// completion gate consults these (injected) helpers; tests toggle membership to
+// model a run that is still looping across inter-attempt gaps.
+let loopActiveSessionKeys = new Set<string>();
 
 const callGatewayMock = vi.fn(async (request: GatewayRequest) => {
   const method = request.method;
@@ -84,6 +88,14 @@ const onAgentEventMock = vi.fn((handler: typeof lifecycleHandler) => {
   lifecycleHandler = handler;
   return noop;
 });
+const isEmbeddedPiRunLoopActiveMock = vi.fn((sessionKey?: string) =>
+  sessionKey ? loopActiveSessionKeys.has(sessionKey) : false,
+);
+// Resolves false (still active) immediately while the loop is marked active so the
+// completion gate re-defers; resolves true once the key is removed (loop settled).
+const waitForEmbeddedPiRunLoopEndMock = vi.fn(async (sessionKey?: string) =>
+  sessionKey ? !loopActiveSessionKeys.has(sessionKey) : true,
+);
 const loadConfigMock = vi.fn(() => ({
   agents: { defaults: { subagents: { archiveAfterMinutes: 0 } } },
   session: { mainKey: "main", scope: "per-sender" },
@@ -127,6 +139,9 @@ describe("subagent registry lifecycle error grace", () => {
     vi.useFakeTimers();
     callGatewayMock.mockClear();
     onAgentEventMock.mockClear();
+    loopActiveSessionKeys = new Set<string>();
+    isEmbeddedPiRunLoopActiveMock.mockClear();
+    waitForEmbeddedPiRunLoopEndMock.mockClear();
     registryStoreMocks.loadRegistryMock.mockClear().mockReturnValue(new Map());
     registryStoreMocks.saveRegistryMock.mockClear();
     loadConfigMock.mockClear().mockReturnValue({
@@ -163,6 +178,10 @@ describe("subagent registry lifecycle error grace", () => {
       getRuntimeConfig: loadConfigMock as typeof import("../config/config.js").getRuntimeConfig,
       onAgentEvent:
         onAgentEventMock as unknown as typeof import("../infra/agent-events.js").onAgentEvent,
+      isEmbeddedPiRunLoopActive:
+        isEmbeddedPiRunLoopActiveMock as unknown as typeof import("./pi-embedded-runner/runs.js").isEmbeddedPiRunLoopActive,
+      waitForEmbeddedPiRunLoopEnd:
+        waitForEmbeddedPiRunLoopEndMock as unknown as typeof import("./pi-embedded-runner/runs.js").waitForEmbeddedPiRunLoopEnd,
     });
     subagentAnnounceTesting.setDepsForTest({
       callGateway: callGatewayMock as typeof import("../gateway/call.js").callGateway,
@@ -358,6 +377,35 @@ describe("subagent registry lifecycle error grace", () => {
 
     await waitForAgentCallCount(1);
     expect(readFirstAnnounceOutcome()?.status).toBe("ok");
+  });
+
+  it("defers completion while the whole-run loop is still active, then completes once", async () => {
+    // Regression: a per-attempt lifecycle `end` WITHOUT mayContinue (e.g. the flag
+    // was mis-derived, or a continuation follows after a slow gap) must not be
+    // reported as terminal while the embedded run loop is still working. Before the
+    // loop-active gate this announced immediately and the coordinator spawned a
+    // racing retry while the original kept running.
+    const childSessionKey = "agent:main:subagent:loop-active";
+    registerCompletionRun("run-loop-active", "loop-active", "loop active test");
+    setAssistantOutput(childSessionKey, "Final answer after loop");
+    loopActiveSessionKeys.add(childSessionKey);
+
+    emitLifecycleEvent("run-loop-active", { phase: "end", endedAt: 1_000 });
+    await flushAsync();
+
+    // Well past the 15s completion grace window: still no announce, because the
+    // run loop has not settled.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushAsync();
+    expect(getAgentResultsForChildSession(childSessionKey)).toEqual([]);
+
+    // Loop settles → the next terminal end completes the run exactly once.
+    loopActiveSessionKeys.delete(childSessionKey);
+    emitLifecycleEvent("run-loop-active", { phase: "end", endedAt: 2_000 });
+    await flushAsync();
+
+    await waitForAgentCallCount(1);
+    expect(getAgentResultsForChildSession(childSessionKey)).toEqual(["Final answer after loop"]);
   });
 
   it("announces error when lifecycle error remains terminal after grace window", async () => {

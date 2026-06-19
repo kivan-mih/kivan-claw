@@ -158,6 +158,7 @@ import {
   resolveHookModelSelection,
 } from "./run/setup.js";
 import { mergeAttemptToolMediaPayloads } from "./run/tool-media-payloads.js";
+import { clearEmbeddedPiRunLoopActive, setEmbeddedPiRunLoopActive } from "./runs.js";
 import {
   resolveLiveToolResultMaxChars,
   sessionLikelyHasOversizedToolResults,
@@ -948,6 +949,13 @@ export async function runEmbeddedPiAgent(
       });
       startupStages.mark("context-engine");
       try {
+        // Mark the whole run loop active for its entire lifetime. The per-attempt
+        // `ACTIVE_EMBEDDED_RUNS` flag is cleared between attempts (and before each
+        // attempt's terminal lifecycle event), so completion gates need this
+        // run-scoped signal to avoid reporting a still-looping run as finished.
+        // Keyed by sessionKey (stable across compaction). Cleared in the matching
+        // `finally` below.
+        setEmbeddedPiRunLoopActive(params.sessionKey, params.runId);
         const resolveActiveHookContext = () => ({
           ...hookCtx,
           sessionId: activeSessionId,
@@ -2854,6 +2862,7 @@ export async function runEmbeddedPiAgent(
           };
         }
       } finally {
+        clearEmbeddedPiRunLoopActive(params.sessionKey, params.runId);
         forgetPromptBuildDrainCacheForRun(params.runId);
         stopRuntimeAuthRefreshTimer();
         await runAgentCleanupStep({

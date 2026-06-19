@@ -40,8 +40,10 @@ import {
 import {
   callGateway,
   isEmbeddedPiRunActive,
+  isEmbeddedPiRunLoopActive,
   getRuntimeConfig,
   waitForEmbeddedPiRunEnd,
+  waitForEmbeddedPiRunLoopEnd,
 } from "./subagent-announce.runtime.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { deleteSubagentSessionForCleanup } from "./subagent-session-cleanup.js";
@@ -275,6 +277,20 @@ export async function runSubagentAnnounceFlow(params: {
     if (childSessionId && isEmbeddedPiRunActive(childSessionId)) {
       const settled = await waitForEmbeddedPiRunEnd(childSessionId, settleTimeoutMs);
       if (!settled && isEmbeddedPiRunActive(childSessionId)) {
+        shouldDeleteChildSession = false;
+        return false;
+      }
+    }
+    // Backstop: the per-attempt flag above is cleared between attempts, so also
+    // wait on the whole-run loop flag (keyed by sessionKey) which stays set across
+    // inter-attempt gaps (compaction / retry prep). Defer the announce while the
+    // run loop is still working, regardless of which completion path got here.
+    if (isEmbeddedPiRunLoopActive(params.childSessionKey)) {
+      const settledLoop = await waitForEmbeddedPiRunLoopEnd(
+        params.childSessionKey,
+        settleTimeoutMs,
+      );
+      if (!settledLoop && isEmbeddedPiRunLoopActive(params.childSessionKey)) {
         shouldDeleteChildSession = false;
         return false;
       }
