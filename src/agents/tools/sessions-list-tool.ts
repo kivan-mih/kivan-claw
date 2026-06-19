@@ -6,6 +6,7 @@ import {
   resolveSessionFilePathOptions,
   resolveStorePath,
 } from "../../config/sessions.js";
+import { parseSessionThreadInfo } from "../../config/sessions/thread-info.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
@@ -235,10 +236,16 @@ export function createSessionsListTool(opts?: {
               agentId: resolvedAgentId,
               storePath: effectiveStorePath,
             });
+            // Reconstruct the transcript filename from the topic/thread id when no
+            // persisted sessionFile exists, mirroring the write path
+            // (config/sessions/transcript.ts) so topic sessions resolve to their
+            // real `*-topic-<id>.jsonl` file instead of a non-existent bare path.
+            const topicId = parseSessionThreadInfo(key).threadId;
             transcriptPath = resolveSessionFilePath(
               sessionId,
               sessionFile ? { sessionFile } : undefined,
               filePathOpts,
+              topicId,
             );
           } catch {
             transcriptPath = undefined;

@@ -104,6 +104,22 @@ describe("session path safety", () => {
     expect(resolved).toBe(path.resolve(topicPath));
   });
 
+  it("reconstructs the topic transcript path from topicId when no sessionFile exists", () => {
+    const sessionsDir = "/tmp/openclaw/agents/main/sessions";
+
+    const resolved = resolveSessionFilePath("sess-1", undefined, { sessionsDir }, "1701");
+
+    expect(resolved).toBe(path.resolve(sessionsDir, "sess-1-topic-1701.jsonl"));
+  });
+
+  it("derives the bare transcript path when no topicId is provided", () => {
+    const sessionsDir = "/tmp/openclaw/agents/main/sessions";
+
+    const resolved = resolveSessionFilePath("sess-1", undefined, { sessionsDir });
+
+    expect(resolved).toBe(path.resolve(sessionsDir, "sess-1.jsonl"));
+  });
+
   it("ignores multi-store sentinel paths when deriving session file options", () => {
     expect(resolveSessionFilePathOptions({ agentId: "worker", storePath: "(multiple)" })).toEqual({
       agentId: "worker",
