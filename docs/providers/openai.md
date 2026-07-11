@@ -233,6 +233,7 @@ Choose your preferred auth method and follow the setup steps.
     |-----------|----------------|-------|------|
     | `openai/gpt-5.5` | `agentRuntime.id: "codex"` | Native Codex app-server harness | Codex sign-in or selected `openai-codex` profile |
     | `openai-codex/gpt-5.5` | omitted / `runtime: "pi"` | ChatGPT/Codex OAuth through PI | Codex sign-in |
+    | `openai-codex/gpt-5.6-sol` | omitted / `runtime: "pi"` | ChatGPT/Codex OAuth through PI | Codex sign-in |
     | `openai-codex/gpt-5.4-mini` | omitted / `runtime: "pi"` | ChatGPT/Codex OAuth through PI | Codex sign-in |
     | `openai-codex/gpt-5.5` | `runtime: "auto"` | Still PI unless a plugin explicitly claims `openai-codex` | Codex sign-in |
 
@@ -261,6 +262,28 @@ Choose your preferred auth method and follow the setup steps.
 
     To keep Codex OAuth on the normal PI runner instead, use
     `openai-codex/gpt-5.5` and omit the Codex runtime override.
+
+    ### GPT-5.6 Sol through PI
+
+    If your Codex account or workspace has GPT-5.6 Sol access, the existing
+    `openai-codex` OAuth profile can run it through PI. This route supports the
+    `max` thinking level and does not require enabling the bundled Codex plugin:
+
+    ```json5
+    {
+      agents: {
+        defaults: {
+          model: { primary: "openai-codex/gpt-5.6-sol" },
+          thinkingDefault: "max",
+          models: { "openai-codex/gpt-5.6-sol": {} },
+        },
+      },
+    }
+    ```
+
+    OpenClaw uses a `372000` token context window and runtime context budget for
+    this OAuth route, with a maximum output of `128000` tokens. GPT-5.5 remains
+    the stable default.
 
     <Note>
     Onboarding no longer imports OAuth material from `~/.codex`. Sign in with browser OAuth (default) or the device-code flow above — OpenClaw manages the resulting credentials in its own agent auth store.
@@ -320,9 +343,9 @@ Choose your preferred auth method and follow the setup steps.
 
     ### Catalog recovery
 
-    OpenClaw uses upstream Codex catalog metadata for `gpt-5.5` when it is
-    present. If live Codex discovery omits the `openai-codex/gpt-5.5` row while
-    the account is authenticated, OpenClaw synthesizes that OAuth model row so
+    OpenClaw uses upstream Codex catalog metadata for `gpt-5.5` and
+    `gpt-5.6-sol` when it is present. If live Codex discovery omits either OAuth
+    model row while the account is authenticated, OpenClaw synthesizes it so
     cron, sub-agent, and configured default-model runs do not fail with
     `Unknown model`.
 

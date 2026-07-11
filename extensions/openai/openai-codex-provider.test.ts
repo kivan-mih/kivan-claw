@@ -384,6 +384,85 @@ describe("openai codex provider", () => {
     });
   });
 
+  it("resolves gpt-5.6-sol through Codex OAuth with Sol limits and zero cost", () => {
+    const provider = buildOpenAICodexProviderPlugin();
+
+    const model = provider.resolveDynamicModel?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-sol",
+      modelRegistry: createSingleModelRegistry(
+        createCodexTemplate({
+          id: "gpt-5.6-sol",
+          cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
+          contextWindow: 1_050_000,
+          contextTokens: 272_000,
+        }),
+      ) as never,
+    });
+
+    expect(model).toMatchObject({
+      id: "gpt-5.6-sol",
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 372_000,
+      contextTokens: 372_000,
+      maxTokens: 128_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      compat: {
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      },
+    });
+  });
+
+  it("synthesizes gpt-5.6-sol when the Codex catalog omits the OAuth row", () => {
+    const provider = buildOpenAICodexProviderPlugin();
+
+    const model = provider.resolveDynamicModel?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-sol",
+      modelRegistry: createSingleModelRegistry(createCodexTemplate({}), null) as never,
+    });
+
+    expect(model).toMatchObject({
+      id: "gpt-5.6-sol",
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 372_000,
+      contextTokens: 372_000,
+      maxTokens: 128_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("advertises max thinking and runtime resolution for gpt-5.6-sol", () => {
+    const provider = buildOpenAICodexProviderPlugin();
+    const profile = provider.resolveThinkingProfile?.({
+      provider: "openai-codex",
+      modelId: "gpt-5.6-sol",
+    } as never);
+
+    expect(profile?.levels.map((level) => level.id)).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(
+      provider.preferRuntimeResolvedModel?.({
+        provider: "openai-codex",
+        modelId: "gpt-5.6-sol",
+      } as never),
+    ).toBe(true);
+  });
+
   it("synthesizes gpt-5.5 when the Codex catalog omits the OAuth row", () => {
     const provider = buildOpenAICodexProviderPlugin();
 

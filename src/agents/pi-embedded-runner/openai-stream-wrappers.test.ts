@@ -33,6 +33,12 @@ const openaiModel = {
   id: "gpt-5.2",
 } as Model<"openai-responses">;
 
+const solCodexModel = {
+  api: "openai-codex-responses",
+  provider: "openai-codex",
+  id: "gpt-5.6-sol",
+} as Model<"openai-codex-responses">;
+
 describe("createOpenAIThinkingLevelWrapper", () => {
   it("overrides effort on reasoning-capable model when thinkingLevel is medium", () => {
     const { baseStreamFn, payloads } = createPayloadCapture({
@@ -207,6 +213,40 @@ describe("createOpenAIThinkingLevelWrapper", () => {
     void wrapped(model as Model<typeof model.api>, { messages: [] }, {});
 
     expect(payloads[0]?.reasoning).toEqual({ effort: "xhigh" });
+  });
+
+  it("preserves max for Codex OAuth gpt-5.6-sol", () => {
+    const { baseStreamFn, payloads } = createPayloadCapture({
+      initialReasoning: { effort: "xhigh", summary: "auto" },
+    });
+    const wrapped = createOpenAIThinkingLevelWrapper(baseStreamFn, "max");
+    void wrapped(solCodexModel, { messages: [] }, {});
+
+    expect(payloads[0]?.reasoning).toEqual({ effort: "max", summary: "auto" });
+  });
+
+  it("keeps max clamped to xhigh for older Codex OAuth models", () => {
+    const { baseStreamFn, payloads } = createPayloadCapture({
+      initialReasoning: { effort: "high" },
+    });
+    const wrapped = createOpenAIThinkingLevelWrapper(baseStreamFn, "max");
+    void wrapped(
+      { ...codexModel, id: "gpt-5.5" } as Model<"openai-codex-responses">,
+      { messages: [] },
+      {},
+    );
+
+    expect(payloads[0]?.reasoning).toEqual({ effort: "xhigh" });
+  });
+
+  it("raises unsupported minimal effort to low for Codex OAuth gpt-5.6-sol", () => {
+    const { baseStreamFn, payloads } = createPayloadCapture({
+      initialReasoning: { effort: "none" },
+    });
+    const wrapped = createOpenAIThinkingLevelWrapper(baseStreamFn, "minimal");
+    void wrapped(solCodexModel, { messages: [] }, {});
+
+    expect(payloads[0]?.reasoning).toEqual({ effort: "low" });
   });
 });
 

@@ -19,6 +19,7 @@ const OPENAI_XHIGH_MODEL_IDS = [
 ] as const;
 
 const OPENAI_CODEX_XHIGH_MODEL_IDS = [
+  "gpt-5.6-sol",
   "gpt-5.5",
   "gpt-5.5-pro",
   "gpt-5.4",
@@ -27,6 +28,8 @@ const OPENAI_CODEX_XHIGH_MODEL_IDS = [
   "gpt-5.2-codex",
   "gpt-5.1-codex",
 ] as const;
+
+const OPENAI_CODEX_MAX_MODEL_IDS = ["gpt-5.6-sol"] as const;
 
 function normalizeModelId(value: string): string {
   return value.trim().toLowerCase();
@@ -43,12 +46,16 @@ function matchesExactOrPrefix(id: string, values: readonly string[]): boolean {
 function buildOpenAIThinkingProfile(params: {
   modelId: string;
   xhighModelIds: readonly string[];
+  maxModelIds?: readonly string[];
 }): ProviderThinkingProfile {
   return {
     levels: [
       ...OPENAI_THINKING_BASE_LEVELS,
       ...(matchesExactOrPrefix(params.modelId, params.xhighModelIds)
         ? [{ id: "xhigh" as const }]
+        : []),
+      ...(matchesExactOrPrefix(params.modelId, params.maxModelIds ?? [])
+        ? [{ id: "max" as const }]
         : []),
     ],
   };
@@ -59,5 +66,9 @@ export function resolveOpenAIThinkingProfile(modelId: string): ProviderThinkingP
 }
 
 export function resolveOpenAICodexThinkingProfile(modelId: string): ProviderThinkingProfile {
-  return buildOpenAIThinkingProfile({ modelId, xhighModelIds: OPENAI_CODEX_XHIGH_MODEL_IDS });
+  return buildOpenAIThinkingProfile({
+    modelId,
+    xhighModelIds: OPENAI_CODEX_XHIGH_MODEL_IDS,
+    maxModelIds: OPENAI_CODEX_MAX_MODEL_IDS,
+  });
 }

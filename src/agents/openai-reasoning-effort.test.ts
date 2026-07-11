@@ -13,6 +13,26 @@ describe("OpenAI reasoning effort support", () => {
     expect(resolveOpenAIReasoningEffortForModel({ model, effort: "xhigh" })).toBe("xhigh");
   });
 
+  it("preserves max and raises minimal to low for Codex OAuth gpt-5.6-sol", () => {
+    const model = { provider: "openai-codex", id: "gpt-5.6-sol" };
+
+    expect(resolveOpenAISupportedReasoningEfforts(model)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(resolveOpenAIReasoningEffortForModel({ model, effort: "max" })).toBe("max");
+    expect(resolveOpenAIReasoningEffortForModel({ model, effort: "minimal" })).toBe("low");
+  });
+
+  it("clamps max to xhigh for older Codex OAuth models", () => {
+    const model = { provider: "openai-codex", id: "gpt-5.5" };
+
+    expect(resolveOpenAIReasoningEffortForModel({ model, effort: "max" })).toBe("xhigh");
+  });
+
   it("preserves reasoning_effort metadata for gpt-5.4-mini in Chat Completions", () => {
     const model = { provider: "openai", id: "gpt-5.4-mini", api: "openai-completions" };
     expect(resolveOpenAISupportedReasoningEfforts(model)).toContain("medium");
