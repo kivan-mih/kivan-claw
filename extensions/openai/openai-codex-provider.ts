@@ -49,12 +49,14 @@ const PROVIDER_ID = "openai-codex";
 const OPENAI_CODEX_BASE_URL = OPENAI_CODEX_RESPONSES_BASE_URL;
 const OPENAI_CODEX_LOGIN_ASSISTANT_PRIORITY = -30;
 const OPENAI_CODEX_DEVICE_PAIRING_ASSISTANT_PRIORITY = -10;
+const OPENAI_CODEX_GPT_56_SOL_MODEL_ID = "gpt-5.6-sol";
 const OPENAI_CODEX_GPT_55_MODEL_ID = "gpt-5.5";
 const OPENAI_CODEX_GPT_55_PRO_MODEL_ID = "gpt-5.5-pro";
 const OPENAI_CODEX_GPT_54_MODEL_ID = "gpt-5.4";
 const OPENAI_CODEX_GPT_54_LEGACY_MODEL_ID = "gpt-5.4-codex";
 const OPENAI_CODEX_GPT_54_MINI_MODEL_ID = "gpt-5.4-mini";
 const OPENAI_CODEX_GPT_54_PRO_MODEL_ID = "gpt-5.4-pro";
+const OPENAI_CODEX_GPT_56_CONTEXT_TOKENS = 372_000;
 const OPENAI_CODEX_GPT_55_CODEX_CONTEXT_TOKENS = 400_000;
 const OPENAI_CODEX_GPT_55_DEFAULT_RUNTIME_CONTEXT_TOKENS = 272_000;
 const OPENAI_CODEX_GPT_55_PRO_NATIVE_CONTEXT_TOKENS = 1_000_000;
@@ -63,6 +65,13 @@ const OPENAI_CODEX_GPT_54_NATIVE_CONTEXT_TOKENS = 1_050_000;
 const OPENAI_CODEX_GPT_54_DEFAULT_CONTEXT_TOKENS = 272_000;
 const OPENAI_CODEX_GPT_54_MINI_NATIVE_CONTEXT_TOKENS = 400_000;
 const OPENAI_CODEX_GPT_54_MAX_TOKENS = 128_000;
+const OPENAI_CODEX_OAUTH_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+} as const;
+const OPENAI_CODEX_GPT_56_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const OPENAI_CODEX_GPT_55_PRO_COST = {
   input: 30,
   output: 180,
@@ -101,6 +110,7 @@ const OPENAI_CODEX_GPT_55_PRO_TEMPLATE_MODEL_IDS = [
 const OPENAI_CODEX_GPT_53_MODEL_ID = "gpt-5.3-codex";
 const OPENAI_CODEX_TEMPLATE_MODEL_IDS = ["gpt-5.2-codex"] as const;
 const OPENAI_CODEX_MODERN_MODEL_IDS = [
+  OPENAI_CODEX_GPT_56_SOL_MODEL_ID,
   OPENAI_CODEX_GPT_55_MODEL_ID,
   OPENAI_CODEX_GPT_55_PRO_MODEL_ID,
   OPENAI_CODEX_GPT_54_MODEL_ID,
@@ -173,6 +183,33 @@ function resolveCodexForwardCompatModel(ctx: ProviderResolveDynamicModelContext)
   const trimmedModelId = ctx.modelId.trim();
   const lower = normalizeLowercaseStringOrEmpty(trimmedModelId);
   const synthBaseUrl = ctx.providerConfig?.baseUrl ?? OPENAI_CODEX_BASE_URL;
+
+  if (lower === OPENAI_CODEX_GPT_56_SOL_MODEL_ID) {
+    const model = ctx.modelRegistry.find(PROVIDER_ID, trimmedModelId) as
+      | ProviderRuntimeModel
+      | undefined;
+    return normalizeModelCompat({
+      ...model,
+      id: trimmedModelId,
+      name: model?.name ?? trimmedModelId,
+      api: "openai-codex-responses",
+      provider: PROVIDER_ID,
+      baseUrl: model?.baseUrl ?? synthBaseUrl,
+      reasoning: true,
+      input: ["text", "image"],
+      cost: OPENAI_CODEX_OAUTH_COST,
+      contextWindow: OPENAI_CODEX_GPT_56_CONTEXT_TOKENS,
+      contextTokens: OPENAI_CODEX_GPT_56_CONTEXT_TOKENS,
+      maxTokens: OPENAI_CODEX_GPT_54_MAX_TOKENS,
+      compat: {
+        ...model?.compat,
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: [...OPENAI_CODEX_GPT_56_REASONING_EFFORTS],
+      } as NonNullable<ProviderRuntimeModel["compat"]> & {
+        supportedReasoningEfforts: string[];
+      },
+    } as ProviderRuntimeModel);
+  }
 
   if (lower === OPENAI_CODEX_GPT_55_MODEL_ID) {
     const model = ctx.modelRegistry.find(PROVIDER_ID, trimmedModelId) as
@@ -507,6 +544,7 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
       }
       const id = ctx.modelId.trim().toLowerCase();
       return [
+        OPENAI_CODEX_GPT_56_SOL_MODEL_ID,
         OPENAI_CODEX_GPT_55_MODEL_ID,
         OPENAI_CODEX_GPT_55_PRO_MODEL_ID,
         OPENAI_CODEX_GPT_54_MODEL_ID,

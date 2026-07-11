@@ -4,6 +4,10 @@ Docs: https://docs.openclaw.ai
 
 ## 2026.5.7
 
+### Changes
+
+- OpenAI/Codex: add GPT-5.6 Sol support for the `openai-codex` OAuth route through PI, including the model's `max` reasoning effort.
+
 ### Fixes
 
 - Gateway: pass agent-scoped media roots to gateway-executed message actions so a non-default agent's workspace media (e.g. Telegram sends) is no longer rejected as cross-agent access.

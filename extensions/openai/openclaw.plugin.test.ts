@@ -6,6 +6,26 @@ import { buildOpenAIProvider } from "./openai-provider.js";
 const manifest = JSON.parse(
   readFileSync(new URL("./openclaw.plugin.json", import.meta.url), "utf8"),
 ) as {
+  modelCatalog?: {
+    providers?: Record<
+      string,
+      {
+        models?: Array<{
+          id?: string;
+          reasoning?: boolean;
+          input?: string[];
+          contextWindow?: number;
+          contextTokens?: number;
+          maxTokens?: number;
+          cost?: Record<string, number>;
+          compat?: {
+            supportsReasoningEffort?: boolean;
+            supportedReasoningEfforts?: string[];
+          };
+        }>;
+      }
+    >;
+  };
   mediaUnderstandingProviderMetadata?: Record<
     string,
     {
@@ -70,6 +90,26 @@ describe("OpenAI plugin manifest", () => {
   it("keeps runtime dependencies in the package manifest", () => {
     expect(packageJson.dependencies?.["@mariozechner/pi-ai"]).toBe("0.73.0");
     expect(packageJson.dependencies?.ws).toBe("^8.20.0");
+  });
+
+  it("declares gpt-5.6-sol for the Codex OAuth route", () => {
+    const sol = manifest.modelCatalog?.providers?.["openai-codex"]?.models?.find(
+      (model) => model.id === "gpt-5.6-sol",
+    );
+
+    expect(sol).toMatchObject({
+      id: "gpt-5.6-sol",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 372_000,
+      contextTokens: 372_000,
+      maxTokens: 128_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      compat: {
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      },
+    });
   });
 
   it("keeps removed Codex CLI import auth choice as a deprecated browser-login alias", () => {

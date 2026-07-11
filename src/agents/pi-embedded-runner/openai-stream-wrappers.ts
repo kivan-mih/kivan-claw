@@ -9,7 +9,10 @@ import {
   resolveCodexNativeSearchActivation,
 } from "../codex-native-web-search-core.js";
 import { flattenCompletionMessagesToStringContent } from "../openai-completions-string-content.js";
-import { resolveOpenAIReasoningEffortForModel } from "../openai-reasoning-effort.js";
+import {
+  resolveOpenAIReasoningEffortForModel,
+  supportsOpenAIReasoningEffort,
+} from "../openai-reasoning-effort.js";
 import {
   applyOpenAIResponsesPayloadPolicy,
   resolveOpenAIResponsesPayloadPolicy,
@@ -129,6 +132,22 @@ function resolveOpenAIThinkingPayloadEffort(params: {
   thinkingLevel: ThinkLevel;
 }) {
   const mapped = mapThinkingLevelToReasoningEffort(params.thinkingLevel);
+  const isCodexOAuth = normalizeOptionalLowercaseString(params.model.provider) === "openai-codex";
+  if (
+    isCodexOAuth &&
+    params.thinkingLevel === "max" &&
+    supportsOpenAIReasoningEffort(params.model, "max")
+  ) {
+    return "max";
+  }
+  if (isCodexOAuth && mapped === "minimal" && supportsOpenAIReasoningEffort(params.model, "max")) {
+    return (
+      resolveOpenAIReasoningEffortForModel({
+        model: params.model,
+        effort: mapped,
+      }) ?? mapped
+    );
+  }
   if (mapped !== "minimal" || !hasResponsesWebSearchTool(params.payloadObj.tools)) {
     return mapped;
   }
