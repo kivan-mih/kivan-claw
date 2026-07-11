@@ -5,11 +5,12 @@ services:
       context: .
       args:
         OPENCLAW_EXTENSIONS: "brave"
+        # Keep this paired with `runtime: sysbox-runc` via docker-compose.sysbox.yml.
+        OPENCLAW_ENABLE_INNER_DOCKER: ""
     restart: unless-stopped
     env_file:
       - .env
     init: true
-    runtime: sysbox-runc
     environment:
       HOME: /home/node
       TERM: xterm-256color
@@ -121,4 +122,3 @@ networks:
   shared:
     name: shared
     external: true
-

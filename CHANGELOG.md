@@ -10,6 +10,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- Docker: use the standard runtime for the custom Compose gateway and disable nested Docker by default, avoiding Sysbox/containerd package conflicts while keeping the legacy Sysbox path available as an explicit opt-in.
 - Gateway: pass agent-scoped media roots to gateway-executed message actions so a non-default agent's workspace media (e.g. Telegram sends) is no longer rejected as cross-agent access.
 - Release/plugin publishing: retry transient ClawHub CLI dependency install failures, keep preview-passing plugins publishable when one preview cell flakes, and verify every expected ClawHub package version after publish so maintenance releases are faster to recover and less likely to hide partial plugin publishes.
 - OpenAI: support `openai/chat-latest` as an explicit direct API-key model override for trying the moving ChatGPT Instant API alias without changing the stable default model.
