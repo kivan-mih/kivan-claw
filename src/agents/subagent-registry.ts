@@ -463,6 +463,13 @@ function schedulePendingLifecycleError(params: { runId: string; endedAt: number;
     if (entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE || entry.outcome?.status === "ok") {
       return;
     }
+    // Defer while the whole-run loop is still active (compaction / retry prep). Re-arm the
+    // same grace rather than freezing a stale error mid-loop; when the loop settles the real
+    // terminal event completes the run (and this re-armed timer short-circuits above).
+    if (subagentRegistryDeps.isEmbeddedPiRunLoopActive(entry.childSessionKey)) {
+      schedulePendingLifecycleError(params);
+      return;
+    }
     void completeSubagentRun({
       runId: params.runId,
       endedAt: pending.endedAt,
@@ -499,6 +506,13 @@ function schedulePendingLifecycleTimeout(params: { runId: string; endedAt: numbe
       return;
     }
     if (entry.outcome?.status === "ok") {
+      return;
+    }
+    // Defer while the whole-run loop is still active (compaction / retry prep). Re-arm the
+    // same grace rather than freezing a stale timeout mid-loop; when the loop settles the
+    // real terminal event completes the run (and this re-armed timer short-circuits above).
+    if (subagentRegistryDeps.isEmbeddedPiRunLoopActive(entry.childSessionKey)) {
+      schedulePendingLifecycleTimeout(params);
       return;
     }
     void completeSubagentRun({
@@ -1160,6 +1174,10 @@ const subagentRunManager = createSubagentRunManager({
   notifyContextEngineSubagentEnded,
   completeCleanupBookkeeping,
   completeSubagentRun,
+  isEmbeddedPiRunLoopActive: (sessionKey) =>
+    subagentRegistryDeps.isEmbeddedPiRunLoopActive(sessionKey),
+  waitForEmbeddedPiRunLoopEnd: (sessionKey, timeoutMs) =>
+    subagentRegistryDeps.waitForEmbeddedPiRunLoopEnd(sessionKey, timeoutMs),
 });
 
 configureSubagentRegistrySteerRuntime({

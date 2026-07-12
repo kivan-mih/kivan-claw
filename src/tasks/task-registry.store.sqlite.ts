@@ -1,7 +1,9 @@
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
+import { formatErrorMessage } from "../infra/errors.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { configureSqliteWalMaintenance, type SqliteWalMaintenance } from "../infra/sqlite-wal.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { resolveTaskRegistryDir, resolveTaskRegistrySqlitePath } from "./task-registry.paths.js";
 import type { TaskRegistryStoreSnapshot } from "./task-registry.store.types.js";
@@ -64,6 +66,7 @@ type TaskRegistryDatabase = {
   walMaintenance: SqliteWalMaintenance;
 };
 
+const log = createSubsystemLogger("tasks/task-registry");
 let cachedDatabase: TaskRegistryDatabase | null = null;
 const TASK_REGISTRY_DIR_MODE = 0o700;
 const TASK_REGISTRY_FILE_MODE = 0o600;
@@ -437,6 +440,72 @@ function ensureTaskRegistryPermissions(pathname: string) {
   }
 }
 
+function isSqliteCorruptionError(error: unknown): boolean {
+  const message = formatErrorMessage(error).toLowerCase();
+  return (
+    message.includes("malformed") ||
+    message.includes("disk image") ||
+    message.includes("not a database") ||
+    message.includes("sqlite_corrupt") ||
+    message.includes("file is encrypted")
+  );
+}
+
+// Move a corrupt DB aside so a fresh one can be created. The main file is preserved for
+// forensics; the WAL/SHM sidecars are dropped — replaying a stale WAL against a fresh DB
+// would re-corrupt it.
+function quarantineCorruptTaskRegistryDb(pathname: string): void {
+  const stamp = `${Date.now()}-${process.pid}`;
+  try {
+    if (existsSync(pathname)) {
+      renameSync(pathname, `${pathname}.corrupt-${stamp}`);
+    }
+  } catch {
+    // If it can't be renamed, remove it so a fresh DB can be created.
+    try {
+      rmSync(pathname, { force: true });
+    } catch {
+      // ignore
+    }
+  }
+  for (const suffix of ["-wal", "-shm"] as const) {
+    try {
+      rmSync(`${pathname}${suffix}`, { force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function createTaskRegistryDatabase(pathname: string): TaskRegistryDatabase {
+  ensureTaskRegistryPermissions(pathname);
+  const { DatabaseSync } = requireNodeSqlite();
+  const db = new DatabaseSync(pathname);
+  let walMaintenance: SqliteWalMaintenance | null = null;
+  try {
+    walMaintenance = configureSqliteWalMaintenance(db);
+    db.exec(`PRAGMA synchronous = NORMAL;`);
+    db.exec(`PRAGMA busy_timeout = 5000;`);
+    ensureSchema(db);
+    ensureTaskRegistryPermissions(pathname);
+    return {
+      db,
+      path: pathname,
+      statements: createStatements(db),
+      walMaintenance,
+    };
+  } catch (error) {
+    // Don't leak the half-open handle / maintenance timer before propagating or quarantining.
+    walMaintenance?.close();
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
+    throw error;
+  }
+}
+
 function openTaskRegistryDatabase(): TaskRegistryDatabase {
   const pathname = resolveTaskRegistrySqlitePath(process.env);
   if (cachedDatabase && cachedDatabase.path === pathname) {
@@ -447,20 +516,22 @@ function openTaskRegistryDatabase(): TaskRegistryDatabase {
     cachedDatabase.db.close();
     cachedDatabase = null;
   }
-  ensureTaskRegistryPermissions(pathname);
-  const { DatabaseSync } = requireNodeSqlite();
-  const db = new DatabaseSync(pathname);
-  const walMaintenance = configureSqliteWalMaintenance(db);
-  db.exec(`PRAGMA synchronous = NORMAL;`);
-  db.exec(`PRAGMA busy_timeout = 5000;`);
-  ensureSchema(db);
-  ensureTaskRegistryPermissions(pathname);
-  cachedDatabase = {
-    db,
-    path: pathname,
-    statements: createStatements(db),
-    walMaintenance,
-  };
+  try {
+    cachedDatabase = createTaskRegistryDatabase(pathname);
+  } catch (error) {
+    if (!isSqliteCorruptionError(error)) {
+      throw error;
+    }
+    // Self-heal a corrupt store instead of re-throwing on every call forever: quarantine
+    // the file (+ drop sidecars) and recreate once. The registry starts empty — records
+    // are transient run state — and durable writes resume.
+    log.warn("task registry sqlite is corrupt; quarantining and recreating", {
+      path: pathname,
+      error,
+    });
+    quarantineCorruptTaskRegistryDb(pathname);
+    cachedDatabase = createTaskRegistryDatabase(pathname);
+  }
   return cachedDatabase;
 }
 

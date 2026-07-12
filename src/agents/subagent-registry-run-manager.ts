@@ -31,6 +31,9 @@ import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 const log = createSubsystemLogger("agents/subagent-registry");
 const RECOVERABLE_WAIT_RETRY_DELAY_MS = process.env.OPENCLAW_TEST_FAST === "1" ? 25 : 5_000;
+// Grace to await a still-active whole-run loop before deferring a terminal wait. Mirrors
+// the lifecycle path's `LIFECYCLE_COMPLETE_RETRY_GRACE_MS` (subagent-registry.ts).
+const LOOP_SETTLE_GRACE_MS = process.env.OPENCLAW_TEST_FAST === "1" ? 50 : 15_000;
 
 function shouldDeleteAttachments(entry: SubagentRunRecord) {
   return entry.cleanup === "delete" || !entry.retainAttachmentsOnKeep;
@@ -143,6 +146,11 @@ export function createSubagentRunManager(params: {
     accountId?: string;
     triggerCleanup: boolean;
   }): Promise<void>;
+  // Whole-run loop-active signal (subagent-registry passes the pi-embedded-runner
+  // helpers). Injected rather than imported to avoid a run-manager -> registry cycle and
+  // to keep the module unit-testable in isolation.
+  isEmbeddedPiRunLoopActive(sessionKey: string | undefined): boolean;
+  waitForEmbeddedPiRunLoopEnd(sessionKey: string | undefined, timeoutMs?: number): Promise<boolean>;
 }) {
   const waitForSubagentCompletion = async (
     runId: string,
@@ -192,6 +200,34 @@ export function createSubagentRunManager(params: {
           }
           void waitForSubagentCompletion(runId, waitTimeoutMs, scheduledEntry);
         }, RECOVERABLE_WAIT_RETRY_DELAY_MS).unref?.();
+        return;
+      }
+      // A terminal wait result while the whole-run loop is still active is NOT truly
+      // terminal: the run is between attempts (compaction / retry prep) and will resume.
+      // Finalizing here would freeze an intermediate outcome (and, for overflow, the
+      // "[assistant turn failed...]" placeholder) and tear down the announce listener
+      // before the real final answer arrives. Defer like a recoverable wait, then re-fetch
+      // a fresh snapshot once the loop settles — mirrors `completeTerminalRunWhenLoopSettled`
+      // on the lifecycle path, which the primary in-process completer already honors.
+      if (params.isEmbeddedPiRunLoopActive(entry.childSessionKey)) {
+        const scheduledEntry = entry;
+        const settled = await params.waitForEmbeddedPiRunLoopEnd(
+          entry.childSessionKey,
+          LOOP_SETTLE_GRACE_MS,
+        );
+        // Reschedule a fresh completion wait (immediately if the loop settled, else after
+        // the recoverable delay) so it re-reads the true terminal snapshot. Guard against
+        // a superseding run or an already-finalized entry, matching the recoverable path.
+        setTimeout(
+          () => {
+            const current = params.runs.get(runId);
+            if (!current || current !== scheduledEntry || typeof current.endedAt === "number") {
+              return;
+            }
+            void waitForSubagentCompletion(runId, waitTimeoutMs, scheduledEntry);
+          },
+          settled ? 0 : RECOVERABLE_WAIT_RETRY_DELAY_MS,
+        ).unref?.();
         return;
       }
       let mutated = false;
