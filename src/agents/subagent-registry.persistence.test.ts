@@ -10,6 +10,14 @@ import {
 } from "../config/sessions/store.js";
 import { callGateway } from "../gateway/call.js";
 import { onAgentEvent } from "../infra/agent-events.js";
+import {
+  createTaskRecord,
+  getTaskById,
+  rebindActiveTaskRun,
+  reloadTaskRegistryFromStore,
+  resetTaskRegistryForTests,
+} from "../tasks/task-registry.js";
+import { isTaskStageConflictError } from "../tasks/task-stage-admission.js";
 import { captureEnv, withEnv } from "../test-utils/env.js";
 import { persistSubagentSessionTiming } from "./subagent-registry-helpers.js";
 import {
@@ -20,7 +28,9 @@ import {
   getSubagentRunByChildSessionKey,
   initSubagentRegistry,
   listSubagentRunsForRequester,
+  markSubagentRunTerminated,
   registerSubagentRun,
+  replaceSubagentRunAfterSteer,
   resetSubagentRegistryForTests,
 } from "./subagent-registry.js";
 import {
@@ -188,6 +198,7 @@ describe("subagent registry persistence", () => {
   };
 
   beforeEach(() => {
+    resetTaskRegistryForTests({ persist: false });
     __testing.setDepsForTest({
       ...createSubagentRegistryTestDeps(),
       persistSubagentRunsToDisk: fastPersistSubagentRunsToDisk,
@@ -207,6 +218,7 @@ describe("subagent registry persistence", () => {
     announceSpy.mockClear();
     __testing.setDepsForTest();
     resetSubagentRegistryForTests({ persist: false });
+    resetTaskRegistryForTests({ persist: false });
     await drainSessionStoreWriterQueuesForTest();
     clearSessionStoreCacheForTest();
     if (tempStateDir) {
@@ -646,7 +658,7 @@ describe("subagent registry persistence", () => {
     expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
   });
 
-  it("reconciles stale unended restored runs that are not restart-recoverable", async () => {
+  it("keeps stale unended restored runs pending for explicit sweep terminalization", async () => {
     const now = Date.now();
     const runId = "run-stale-unended-restore";
     const childSessionKey = "agent:main:subagent:stale-unended-restore";
@@ -666,17 +678,18 @@ describe("subagent registry persistence", () => {
       },
     });
 
+    vi.mocked(callGateway).mockResolvedValue({ status: "pending" });
     restartRegistry();
-    await waitForRegistryWork(async () => {
-      const after = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-        runs?: Record<string, unknown>;
-      };
-      return after.runs?.[runId] === undefined;
-    });
+    await waitForRegistryWork(() => vi.mocked(callGateway).mock.calls.length > 0);
 
-    expect(callGateway).not.toHaveBeenCalled();
+    const after = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+      runs?: Record<string, unknown>;
+    };
+    expect(after.runs?.[runId]).toBeDefined();
     expect(announceSpy).not.toHaveBeenCalled();
-    expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
+    const restoredRuns = listSubagentRunsForRequester("agent:main:main");
+    expect(restoredRuns).toEqual([expect.objectContaining({ runId })]);
+    expect(restoredRuns[0]?.endedAt).toBeUndefined();
   });
 
   it("keeps stale unended restored runs with abortedLastRun for restart recovery", async () => {
@@ -720,6 +733,235 @@ describe("subagent registry persistence", () => {
     expect(
       listSubagentRunsForRequester("agent:main:main").some((entry) => entry.runId === runId),
     ).toBe(true);
+  });
+
+  it.each([
+    { failAt: 2, persistedPhase: "prepared" },
+    { failAt: 3, persistedPhase: "task_rebound" },
+    { failAt: 4, persistedPhase: "session_reconciled" },
+  ])(
+    "repairs a recovery remap after persistence fails at boundary $failAt",
+    async ({ failAt, persistedPhase }) => {
+      tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-remap-"));
+      process.env.OPENCLAW_STATE_DIR = tempStateDir;
+      const childSessionKey = "agent:main:subagent:remap-crash";
+      const sessionStorePath = await writeChildSessionEntry({
+        sessionKey: childSessionKey,
+        sessionId: "sess-remap-crash",
+      });
+      vi.mocked(callGateway).mockResolvedValue({ status: "pending" });
+
+      registerSubagentRun({
+        runId: "run-remap-old",
+        childSessionKey,
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        task: "survive a recovery remap crash",
+        cleanup: "keep",
+        stageKey: "implementation",
+      });
+      const original = listSubagentRunsForRequester("agent:main:main")[0];
+      if (!original?.taskId) {
+        throw new Error("missing original task");
+      }
+      original.pauseReason = "sessions_yield";
+      original.endedAt = Date.now();
+      const staleEndedAt = Date.now();
+      await persistSubagentSessionTiming({
+        ...original,
+        endedAt: staleEndedAt,
+        outcome: { status: "error", error: "transport interrupted" },
+      });
+
+      let persistCalls = 0;
+      __testing.setDepsForTest({
+        ...createSubagentRegistryTestDeps(),
+        callGateway,
+        runSubagentAnnounceFlow: announceSpy,
+        persistSubagentRunsToDisk: (runs: Map<string, SubagentRunRecord>) => {
+          persistCalls += 1;
+          if (persistCalls === failAt) {
+            return false;
+          }
+          fastPersistSubagentRunsToDisk(runs);
+          return true;
+        },
+      });
+
+      await expect(
+        replaceSubagentRunAfterSteer({
+          previousRunId: "run-remap-old",
+          nextRunId: "run-remap-new",
+          fallback: original,
+        }),
+      ).resolves.toBe(false);
+      const registryPath = resolveSubagentRegistryPath();
+      const interrupted = await readPersistedRun<SubagentRunRecord>(registryPath, "run-remap-new");
+      expect(interrupted?.recoveryRemap?.phase).toBe(persistedPhase);
+
+      resetSubagentRegistryForTests({ persist: false });
+      reloadTaskRegistryFromStore();
+      __testing.setDepsForTest({
+        ...createSubagentRegistryTestDeps(),
+        callGateway,
+        runSubagentAnnounceFlow: announceSpy,
+        persistSubagentRunsToDisk: fastPersistSubagentRunsToDisk,
+      });
+      initSubagentRegistry();
+
+      await waitForRegistryWork(async () => {
+        const runs = listSubagentRunsForRequester("agent:main:main");
+        const task = getTaskById(original.taskId!);
+        const session = (await readSubagentSessionStore(sessionStorePath))[childSessionKey];
+        return (
+          runs.length === 1 &&
+          runs[0]?.runId === "run-remap-new" &&
+          runs[0]?.recoveryRemap === undefined &&
+          task?.runId === "run-remap-new" &&
+          task.status === "running" &&
+          session?.status === "running" &&
+          session.endedAt === undefined
+        );
+      });
+
+      try {
+        createTaskRecord({
+          runtime: "subagent",
+          ownerKey: "agent:main:main",
+          scopeKind: "session",
+          childSessionKey: "agent:main:subagent:duplicate-remap",
+          runId: `run-remap-duplicate-${failAt}`,
+          stageKey: "implementation",
+          task: "duplicate recovered implementation",
+          status: "queued",
+        });
+        throw new Error("Expected recovered stage admission to reject a duplicate.");
+      } catch (error) {
+        expect(isTaskStageConflictError(error)).toBe(true);
+        if (isTaskStageConflictError(error)) {
+          expect(error.incumbent).toMatchObject({
+            taskId: original.taskId,
+            runId: "run-remap-new",
+            status: "running",
+          });
+        }
+      }
+    },
+  );
+
+  it("keeps an operator kill terminal across a prepared remap restart", async () => {
+    tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-remap-kill-"));
+    process.env.OPENCLAW_STATE_DIR = tempStateDir;
+    const childSessionKey = "agent:main:subagent:remap-kill";
+    vi.mocked(callGateway).mockResolvedValue({ status: "pending" });
+
+    registerSubagentRun({
+      runId: "run-remap-kill-old",
+      childSessionKey,
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "remain cancelled through remap repair",
+      cleanup: "keep",
+      stageKey: "implementation",
+    });
+    const original = listSubagentRunsForRequester("agent:main:main")[0];
+    if (!original?.taskId) {
+      throw new Error("missing original task");
+    }
+    original.pauseReason = "sessions_yield";
+    original.endedAt = Date.now();
+
+    let persistCalls = 0;
+    __testing.setDepsForTest({
+      ...createSubagentRegistryTestDeps(),
+      persistSubagentRunsToDisk: (runs: Map<string, SubagentRunRecord>) => {
+        persistCalls += 1;
+        if (persistCalls === 2) {
+          return false;
+        }
+        fastPersistSubagentRunsToDisk(runs);
+        return true;
+      },
+      runSubagentAnnounceFlow: announceSpy,
+    });
+
+    await expect(
+      replaceSubagentRunAfterSteer({
+        previousRunId: original.runId,
+        nextRunId: "run-remap-kill-new",
+        fallback: original,
+      }),
+    ).resolves.toBe(false);
+    expect(
+      rebindActiveTaskRun({
+        taskId: original.taskId,
+        previousRunId: "run-remap-kill-new",
+        nextRunId: original.runId,
+        runtime: "subagent",
+        sessionKey: childSessionKey,
+      })[0],
+    ).toMatchObject({ runId: original.runId, status: "running" });
+    const interrupted = await readPersistedRun<SubagentRunRecord>(
+      resolveSubagentRegistryPath(),
+      "run-remap-kill-new",
+    );
+    if (!interrupted) {
+      throw new Error("missing prepared recovery remap");
+    }
+    resetSubagentRegistryForTests({ persist: false });
+    addSubagentRunForTests(interrupted);
+    expect(
+      listSubagentRunsForRequester("agent:main:main").find(
+        (entry) => entry.runId === "run-remap-kill-new",
+      )?.recoveryRemap?.phase,
+    ).toBe("prepared");
+
+    expect(
+      markSubagentRunTerminated({ runId: "run-remap-kill-new", reason: "operator kill" }),
+    ).toBe(1);
+    expect(getTaskById(original.taskId)).toMatchObject({
+      runId: "run-remap-kill-old",
+      status: "cancelled",
+      deliveryStatus: "not_applicable",
+    });
+    expect(
+      listSubagentRunsForRequester("agent:main:main").find(
+        (entry) => entry.runId === "run-remap-kill-new",
+      )?.recoveryRemap,
+    ).toBeUndefined();
+
+    resetSubagentRegistryForTests({ persist: false });
+    reloadTaskRegistryFromStore();
+    __testing.setDepsForTest({
+      ...createSubagentRegistryTestDeps(),
+      persistSubagentRunsToDisk: fastPersistSubagentRunsToDisk,
+      runSubagentAnnounceFlow: announceSpy,
+    });
+    initSubagentRegistry();
+
+    await waitForRegistryWork(() => {
+      const task = getTaskById(original.taskId!);
+      const replacement = listSubagentRunsForRequester("agent:main:main").find(
+        (entry) => entry.runId === "run-remap-kill-new",
+      );
+      return task?.status === "cancelled" && replacement?.recoveryRemap === undefined;
+    });
+    expect(getTaskById(original.taskId)).toMatchObject({
+      runId: "run-remap-kill-old",
+      status: "cancelled",
+    });
+    expect(
+      createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:remap-kill-replacement",
+        runId: "run-remap-kill-replacement",
+        stageKey: "implementation",
+        task: "replacement after operator kill",
+        status: "queued",
+      }),
+    ).toMatchObject({ status: "queued", stageKey: "implementation" });
   });
 
   it("removes attachments when pruning orphaned restored runs", async () => {

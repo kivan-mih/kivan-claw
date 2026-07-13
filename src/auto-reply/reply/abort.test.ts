@@ -34,6 +34,7 @@ const commandQueueMocks = vi.hoisted(() => ({
 vi.mock("../../process/command-queue.js", () => commandQueueMocks);
 
 const subagentRegistryMocks = vi.hoisted(() => ({
+  countPendingDescendantRuns: vi.fn(() => 0),
   listSubagentRunsForRequester: vi.fn<(requesterSessionKey: string) => SubagentRunRecord[]>(
     () => [],
   ),
@@ -44,6 +45,7 @@ const subagentRegistryMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../agents/subagent-registry.js", () => ({
+  countPendingDescendantRuns: subagentRegistryMocks.countPendingDescendantRuns,
   getLatestSubagentRunByChildSessionKey:
     subagentRegistryMocks.getLatestSubagentRunByChildSessionKey,
   listSubagentRunsForRequester: subagentRegistryMocks.listSubagentRunsForRequester,
@@ -177,6 +179,7 @@ describe("abort detection", () => {
           cancelSession: acpManagerMocks.cancelSession,
         }) as never) as never,
       abortEmbeddedPiRun: () => true,
+      countPendingDescendantRuns: subagentRegistryMocks.countPendingDescendantRuns,
       getLatestSubagentRunByChildSessionKey:
         subagentRegistryMocks.getLatestSubagentRunByChildSessionKey,
       listSubagentRunsForController: subagentRegistryMocks.listSubagentRunsForRequester,
@@ -197,6 +200,7 @@ describe("abort detection", () => {
     acpManagerMocks.resolveSession.mockReset().mockReturnValue({ kind: "none" });
     acpManagerMocks.cancelSession.mockReset().mockResolvedValue(undefined);
     subagentRegistryMocks.getLatestSubagentRunByChildSessionKey.mockReset().mockReturnValue(null);
+    subagentRegistryMocks.countPendingDescendantRuns.mockReset().mockReturnValue(0);
   });
 
   it("isAbortTrigger matches standalone abort trigger phrases", () => {
@@ -676,6 +680,121 @@ describe("abort detection", () => {
     expectSessionLaneCleared(depth2Key);
     expect(subagentRegistryMocks.markSubagentRunTerminated).toHaveBeenCalledWith(
       expect.objectContaining({ runId: "run-2", childSessionKey: depth2Key }),
+    );
+  });
+
+  it("stop terminates a yielded parent that is reconciling without descendants", async () => {
+    subagentRegistryMocks.listSubagentRunsForRequester.mockClear();
+    subagentRegistryMocks.markSubagentRunTerminated.mockClear();
+    const sessionKey = "telegram:yielded-parent";
+    const childKey = "agent:main:subagent:yielded-reconciling-stop";
+    const now = Date.now();
+    const { cfg } = await createAbortConfig({
+      nowMs: now,
+      sessionIdsByKey: {
+        [sessionKey]: "session-parent",
+        [childKey]: "session-yielded-parent",
+      },
+    });
+    const yieldedParent = {
+      runId: "run-yielded-reconciling-stop",
+      childSessionKey: childKey,
+      requesterSessionKey: sessionKey,
+      requesterDisplayKey: sessionKey,
+      task: "reconcile yielded parent",
+      cleanup: "keep" as const,
+      createdAt: now - 1_000,
+      endedAt: now - 500,
+      pauseReason: "sessions_yield" as const,
+    };
+    subagentRegistryMocks.listSubagentRunsForRequester
+      .mockReturnValueOnce([yieldedParent])
+      .mockReturnValueOnce([]);
+    subagentRegistryMocks.getLatestSubagentRunByChildSessionKey.mockImplementation((key) =>
+      key === childKey ? yieldedParent : null,
+    );
+
+    const result = await runStopCommand({
+      cfg,
+      sessionKey,
+      from: "telegram:parent",
+      to: "telegram:parent",
+    });
+
+    expect(result.stoppedSubagents).toBe(1);
+    expect(subagentRegistryMocks.markSubagentRunTerminated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-yielded-reconciling-stop",
+        childSessionKey: childKey,
+      }),
+    );
+  });
+
+  it("stop terminates a yielded parent before cascading to its pending descendant", async () => {
+    subagentRegistryMocks.listSubagentRunsForRequester.mockClear();
+    subagentRegistryMocks.markSubagentRunTerminated.mockClear();
+    const sessionKey = "telegram:yielded-tree";
+    const parentKey = "agent:main:subagent:yielded-tree-parent";
+    const childKey = `${parentKey}:subagent:child`;
+    const now = Date.now();
+    const { cfg } = await createAbortConfig({
+      nowMs: now,
+      sessionIdsByKey: {
+        [sessionKey]: "session-root",
+        [parentKey]: "session-yielded-tree-parent",
+        [childKey]: "session-yielded-tree-child",
+      },
+    });
+    const yieldedParent = {
+      runId: "run-yielded-tree-parent",
+      childSessionKey: parentKey,
+      requesterSessionKey: sessionKey,
+      requesterDisplayKey: sessionKey,
+      task: "wait for pending child",
+      cleanup: "keep" as const,
+      createdAt: now - 2_000,
+      endedAt: now - 1_500,
+      pauseReason: "sessions_yield" as const,
+    };
+    const child = {
+      runId: "run-yielded-tree-child",
+      childSessionKey: childKey,
+      requesterSessionKey: parentKey,
+      requesterDisplayKey: parentKey,
+      task: "pending child",
+      cleanup: "keep" as const,
+      createdAt: now - 1_000,
+    };
+    subagentRegistryMocks.listSubagentRunsForRequester
+      .mockReturnValueOnce([yieldedParent])
+      .mockReturnValueOnce([child])
+      .mockReturnValueOnce([]);
+    subagentRegistryMocks.getLatestSubagentRunByChildSessionKey.mockImplementation((key) => {
+      if (key === parentKey) {
+        return yieldedParent;
+      }
+      if (key === childKey) {
+        return child;
+      }
+      return null;
+    });
+    subagentRegistryMocks.countPendingDescendantRuns.mockImplementation((key) =>
+      key === parentKey ? 1 : 0,
+    );
+
+    const result = await runStopCommand({
+      cfg,
+      sessionKey,
+      from: "telegram:parent",
+      to: "telegram:parent",
+    });
+
+    expect(result.stoppedSubagents).toBe(2);
+    expect(subagentRegistryMocks.markSubagentRunTerminated).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-yielded-tree-parent", childSessionKey: parentKey }),
+    );
+    expect(subagentRegistryMocks.markSubagentRunTerminated).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-yielded-tree-child", childSessionKey: childKey }),
     );
   });
 

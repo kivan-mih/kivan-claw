@@ -278,15 +278,18 @@ export function reconcileOrphanedRun(params: {
 export function reconcileOrphanedRestoredRuns(params: {
   runs: Map<string, SubagentRunRecord>;
   resumedRuns: Set<string>;
+  excludeRunIds?: ReadonlySet<string>;
 }) {
   const storeCache = new Map<string, Record<string, SessionEntry>>();
   const now = Date.now();
   let changed = false;
   for (const [runId, entry] of params.runs.entries()) {
+    if (params.excludeRunIds?.has(runId)) {
+      continue;
+    }
     const orphanReason = resolveSubagentRunOrphanReason({
       entry,
       storeCache,
-      includeStaleUnended: true,
       now,
     });
     if (!orphanReason) {

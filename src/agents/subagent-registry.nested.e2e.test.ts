@@ -216,6 +216,28 @@ describe("subagent registry nested agent tracking", () => {
     expect(countPendingDescendantRuns("agent:main:subagent:orch-pending")).toBe(1);
   });
 
+  it("keeps stale unended descendants pending until explicit terminal cleanup", async () => {
+    const { addSubagentRunForTests, countActiveDescendantRuns, countPendingDescendantRuns } =
+      subagentRegistry;
+    const parentSessionKey = "agent:main:subagent:stale-parent";
+    const staleStartedAt = Date.now() - 3 * 60 * 60_000;
+
+    addSubagentRunForTests({
+      runId: "run-stale-pending-child",
+      childSessionKey: `${parentSessionKey}:subagent:child`,
+      requesterSessionKey: parentSessionKey,
+      requesterDisplayKey: "stale-parent",
+      task: "interrupted descendant",
+      cleanup: "keep",
+      createdAt: staleStartedAt,
+      startedAt: staleStartedAt,
+      cleanupHandled: false,
+    });
+
+    expect(countActiveDescendantRuns(parentSessionKey)).toBe(0);
+    expect(countPendingDescendantRuns(parentSessionKey)).toBe(1);
+  });
+
   it("keeps parent pending for parallel children until both descendants complete cleanup", async () => {
     const { addSubagentRunForTests, countPendingDescendantRuns } = subagentRegistry;
     const parentSessionKey = "agent:main:subagent:orch-parallel";

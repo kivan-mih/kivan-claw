@@ -12,6 +12,7 @@ const hoisted = vi.hoisted(() => {
 });
 
 vi.mock("../subagent-spawn.js", () => ({
+  SUBAGENT_SPAWN_CONFLICT_POLICIES: ["reject"],
   SUBAGENT_SPAWN_CONTEXT_MODES: ["isolated", "fork"],
   SUBAGENT_SPAWN_MODES: ["run", "session"],
   spawnSubagentDirect: (...args: unknown[]) => hoisted.spawnSubagentDirectMock(...args),
@@ -84,6 +85,32 @@ describe("sessions_spawn tool", () => {
     expect(schema.properties?.runtime?.enum).toEqual(["subagent"]);
     expect(schema.properties?.resumeSessionId).toBeUndefined();
     expect(schema.properties?.streamTo).toBeUndefined();
+  });
+
+  it("exposes and forwards native-subagent stage admission fields", async () => {
+    const tool = createSessionsSpawnTool({ agentSessionKey: "agent:main:main" });
+    const schema = tool.parameters as {
+      properties?: {
+        stageKey?: { maxLength?: number };
+        onConflict?: { enum?: string[] };
+      };
+    };
+    expect(schema.properties?.stageKey?.maxLength).toBe(256);
+    expect(schema.properties?.onConflict?.enum).toEqual(["reject"]);
+
+    await tool.execute("call-stage", {
+      task: "plan the work",
+      stageKey: "planner",
+      onConflict: "reject",
+    });
+    expect(hoisted.spawnSubagentDirectMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "plan the work",
+        stageKey: "planner",
+        onConflict: "reject",
+      }),
+      expect.any(Object),
+    );
   });
 
   it("advertises ACP runtime affordances when an ACP backend is loaded", () => {

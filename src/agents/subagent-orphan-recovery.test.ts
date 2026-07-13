@@ -10,6 +10,11 @@ import {
 import * as subagentRegistrySteerRuntime from "./subagent-registry-steer-runtime.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
+const recoveryCleanupMocks = vi.hoisted(() => ({
+  abortEmbeddedPiRun: vi.fn(() => false),
+  clearSessionQueues: vi.fn(() => ({ followupCleared: 0, laneCleared: 0, keys: [] })),
+}));
+
 // Mock dependencies before importing the module under test
 vi.mock("../config/config.js", () => ({
   getRuntimeConfig: vi.fn(() => ({
@@ -42,9 +47,12 @@ vi.mock("./subagent-announce-origin.js", () => ({
   resolveAnnounceOrigin: vi.fn((entry, requesterOrigin) => requesterOrigin),
 }));
 
+vi.mock("./subagent-control.runtime.js", () => recoveryCleanupMocks);
+
 vi.mock("./subagent-registry-steer-runtime.js", () => ({
   replaceSubagentRunAfterSteer: vi.fn(() => true),
   finalizeInterruptedSubagentRun: vi.fn(async () => 1),
+  hasPendingSubagentRecoveryRemap: vi.fn(() => false),
 }));
 
 function createTestRunRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
@@ -101,6 +109,14 @@ describe("subagent-orphan-recovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    recoveryCleanupMocks.abortEmbeddedPiRun.mockReturnValue(false);
+    recoveryCleanupMocks.clearSessionQueues.mockReturnValue({
+      followupCleared: 0,
+      laneCleared: 0,
+      keys: [],
+    });
+    vi.mocked(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).mockResolvedValue(true);
+    vi.mocked(subagentRegistrySteerRuntime.hasPendingSubagentRecoveryRemap).mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -147,6 +163,29 @@ describe("subagent-orphan-recovery", () => {
         fallback: run,
       }),
     );
+  });
+
+  it("quarantines both attempts of an unresolved recovery remap", async () => {
+    mockSingleAbortedSession();
+    const previous = createTestRunRecord({ runId: "run-remap-old" });
+    const next = createTestRunRecord({
+      runId: "run-remap-new",
+      logicalRunId: "run-remap-old",
+      recoveryRemap: {
+        previousRunId: "run-remap-old",
+        nextRunId: "run-remap-new",
+        phase: "prepared",
+        preparedAt: Date.now(),
+      },
+    });
+
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => createActiveRuns(previous, next),
+    });
+
+    expect(result).toMatchObject({ recovered: 0, failed: 0, skipped: 2 });
+    expect(gateway.callGateway).not.toHaveBeenCalled();
+    expect(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).not.toHaveBeenCalled();
   });
 
   it("skips sessions that are not aborted", async () => {
@@ -559,7 +598,8 @@ describe("subagent-orphan-recovery", () => {
 
   it("does not retry a session after the gateway accepted resume but run remap failed", async () => {
     vi.mocked(gateway.callGateway).mockResolvedValue({ runId: "new-run" } as never);
-    vi.mocked(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).mockReturnValue(false);
+    vi.mocked(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).mockResolvedValue(false);
+    vi.mocked(subagentRegistrySteerRuntime.hasPendingSubagentRecoveryRemap).mockReturnValue(true);
 
     vi.mocked(sessions.loadSessionStore).mockReturnValue({
       "agent:main:subagent:test-session-1": {
@@ -588,6 +628,24 @@ describe("subagent-orphan-recovery", () => {
     expect(second.skipped).toBe(1);
     expect(gateway.callGateway).toHaveBeenCalledOnce();
     expect(sessions.updateSessionStore).toHaveBeenCalledOnce();
+  });
+
+  it("aborts an accepted recovery run when remap is rejected", async () => {
+    vi.mocked(gateway.callGateway).mockResolvedValue({ runId: "rejected-remap-run" } as never);
+    vi.mocked(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).mockResolvedValue(false);
+    recoveryCleanupMocks.abortEmbeddedPiRun.mockReturnValue(true);
+    mockSingleAbortedSession();
+
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => createActiveRuns(createTestRunRecord()),
+    });
+
+    expect(result).toMatchObject({ recovered: 0, failed: 1 });
+    expect(recoveryCleanupMocks.abortEmbeddedPiRun).toHaveBeenCalledWith("session-abc");
+    expect(subagentRegistrySteerRuntime.hasPendingSubagentRecoveryRemap).toHaveBeenCalledWith({
+      previousRunId: "run-1",
+      nextRunId: "rejected-remap-run",
+    });
   });
 
   it("finalizes interrupted runs with a readable failure after recovery retries are exhausted", async () => {

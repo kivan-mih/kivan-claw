@@ -46,6 +46,13 @@ import {
   waitForEmbeddedPiRunLoopEnd,
 } from "./subagent-announce.runtime.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
+import {
+  movePreparedSubagentRecoveryAdmission,
+  prepareSubagentRecoveryAdmission,
+  quarantineUncertainSubagentRecovery,
+  rollbackSubagentRecoveryAdmission,
+  type PreparedSubagentRecoveryAdmission,
+} from "./subagent-recovery-admission.js";
 import { deleteSubagentSessionForCleanup } from "./subagent-session-cleanup.js";
 import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
 import { isAnnounceSkip } from "./tools/sessions-send-tokens.js";
@@ -66,6 +73,10 @@ let subagentAnnounceDeps: SubagentAnnounceDeps = defaultSubagentAnnounceDeps;
 
 const subagentRegistryRuntimeLoader = createLazyImportLoader(
   () => import("./subagent-announce.registry.runtime.js"),
+);
+
+const subagentControlRuntimeLoader = createLazyImportLoader(
+  () => import("./subagent-control.runtime.js"),
 );
 
 function loadSubagentRegistryRuntime() {
@@ -182,8 +193,38 @@ async function wakeSubagentRunAfterDescendants(params: {
     taskLabel: params.taskLabel,
   });
 
-  let wakeRunId = "";
+  const registryRuntime = await loadSubagentRegistryRuntime();
+  const entry = registryRuntime.getLatestSubagentRunByChildSessionKey(params.childSessionKey);
+  if (!entry || entry.runId !== params.runId) {
+    return false;
+  }
+
+  const requestedWakeRunId = buildAnnounceIdempotencyKey(`${params.announceId}:wake`);
+  let admission: PreparedSubagentRecoveryAdmission;
+  let wakeRunId = requestedWakeRunId;
+  let dispatchAttempted = false;
   try {
+    admission = prepareSubagentRecoveryAdmission({
+      entry,
+      nextRunId: requestedWakeRunId,
+    });
+    wakeRunId = admission.nextRunId;
+  } catch {
+    return false;
+  }
+
+  const stopAcceptedWake = async () => {
+    try {
+      const runtime = await subagentControlRuntimeLoader.load();
+      runtime.abortEmbeddedPiRun(childEntry.sessionId);
+      runtime.clearSessionQueues([params.childSessionKey, childEntry.sessionId]);
+    } catch {
+      // The durable quarantine below remains authoritative when stop is unavailable.
+    }
+  };
+
+  try {
+    dispatchAttempted = true;
     const wakeResponse = await runAnnounceDeliveryWithRetry<{ runId?: string }>({
       operation: "descendant wake agent call",
       signal: params.signal,
@@ -200,13 +241,28 @@ async function wakeSubagentRunAfterDescendants(params: {
               sourceChannel: INTERNAL_MESSAGE_CHANNEL,
               sourceTool: "subagent_announce",
             },
-            idempotencyKey: buildAnnounceIdempotencyKey(`${params.announceId}:wake`),
+            idempotencyKey: admission.nextRunId,
           },
           timeoutMs: announceTimeoutMs,
         }),
     });
-    wakeRunId = normalizeOptionalString(wakeResponse?.runId) ?? "";
+    wakeRunId = normalizeOptionalString(wakeResponse?.runId) ?? admission.nextRunId;
+    admission = movePreparedSubagentRecoveryAdmission({
+      entry,
+      admission,
+      nextRunId: wakeRunId,
+    });
   } catch {
+    if (!dispatchAttempted) {
+      rollbackSubagentRecoveryAdmission({ entry, admission });
+    } else {
+      await stopAcceptedWake();
+      quarantineUncertainSubagentRecovery({
+        entry,
+        runId: wakeRunId,
+        reason: "Descendant wake dispatch failed without terminal cleanup proof.",
+      });
+    }
     return false;
   }
 
@@ -214,12 +270,29 @@ async function wakeSubagentRunAfterDescendants(params: {
     return false;
   }
 
-  const { replaceSubagentRunAfterSteer } = await loadSubagentRegistryRuntime();
-  return replaceSubagentRunAfterSteer({
+  const replaced = await registryRuntime.replaceSubagentRunAfterSteer({
     previousRunId: params.runId,
     nextRunId: wakeRunId,
     preserveFrozenResultFallback: true,
   });
+  if (replaced) {
+    return true;
+  }
+  if (
+    registryRuntime.hasPendingSubagentRecoveryRemap({
+      previousRunId: params.runId,
+      nextRunId: wakeRunId,
+    })
+  ) {
+    return true;
+  }
+  await stopAcceptedWake();
+  quarantineUncertainSubagentRecovery({
+    entry,
+    runId: wakeRunId,
+    reason: "Accepted descendant wake could not be reconciled with its logical task.",
+  });
+  return false;
 }
 
 export async function runSubagentAnnounceFlow(params: {
@@ -638,6 +711,7 @@ export async function runSubagentAnnounceFlow(params: {
 }
 
 export const __testing = {
+  wakeSubagentRunAfterDescendants,
   setDepsForTest(overrides?: Partial<SubagentAnnounceDeps>) {
     subagentAnnounceDeps = overrides
       ? {

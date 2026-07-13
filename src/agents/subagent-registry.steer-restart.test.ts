@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextEngine } from "../context-engine/types.js";
+import { findTaskByRunId, resetTaskRegistryForTests } from "../tasks/task-registry.js";
+import { resolveSubagentWorkflowProjection } from "./subagent-run-liveness.js";
 
 const noop = () => {};
 let lifecycleHandler:
@@ -126,6 +128,7 @@ describe("subagent registry steer restarts", () => {
     runSubagentEndedHookMock.mockImplementation(async () => {});
     emitSessionLifecycleEventMock.mockReset();
     mod.resetSubagentRegistryForTests({ persist: false });
+    resetTaskRegistryForTests();
   });
 
   const flushAnnounce = async () => {
@@ -213,12 +216,12 @@ describe("subagent registry steer restarts", () => {
     });
   };
 
-  const replaceRunAfterSteer = (params: {
+  const replaceRunAfterSteer = async (params: {
     previousRunId: string;
     nextRunId: string;
     fallback?: ReturnType<typeof listMainRuns>[number];
   }) => {
-    const replaced = mod.replaceSubagentRunAfterSteer({
+    const replaced = await mod.replaceSubagentRunAfterSteer({
       previousRunId: params.previousRunId,
       nextRunId: params.nextRunId,
       fallback: params.fallback,
@@ -241,6 +244,7 @@ describe("subagent registry steer restarts", () => {
     emitSessionLifecycleEventMock.mockReset();
     lifecycleHandler = undefined;
     mod.resetSubagentRegistryForTests({ persist: false });
+    resetTaskRegistryForTests();
   });
 
   it("suppresses announce for interrupted runs and only announces the replacement run", async () => {
@@ -264,7 +268,7 @@ describe("subagent registry steer restarts", () => {
       expect(runSubagentEndedHookMock).not.toHaveBeenCalled();
       expect(emitSessionLifecycleEventMock).not.toHaveBeenCalled();
 
-      replaceRunAfterSteer({
+      await replaceRunAfterSteer({
         previousRunId: "run-old",
         nextRunId: "run-new",
         fallback: previous,
@@ -371,7 +375,7 @@ describe("subagent registry steer restarts", () => {
         previous.lastAnnounceRetryAt = Date.now();
       }
 
-      const run = replaceRunAfterSteer({
+      const run = await replaceRunAfterSteer({
         previousRunId: "run-retry-reset-old",
         nextRunId: "run-retry-reset-new",
         fallback: previous,
@@ -398,7 +402,7 @@ describe("subagent registry steer restarts", () => {
         previous.outcome = { status: "ok" };
       }
 
-      const run = replaceRunAfterSteer({
+      const run = await replaceRunAfterSteer({
         previousRunId: "run-terminal-state-old",
         nextRunId: "run-terminal-state-new",
         fallback: previous,
@@ -427,7 +431,7 @@ describe("subagent registry steer restarts", () => {
     }
   });
 
-  it("clears frozen completion fields when replacing after steer restart", () => {
+  it("clears frozen completion fields when replacing after steer restart", async () => {
     registerRun({
       runId: "run-frozen-old",
       childSessionKey: "agent:main:subagent:frozen",
@@ -443,7 +447,7 @@ describe("subagent registry steer restarts", () => {
       previous.cleanupHandled = true;
     }
 
-    const run = replaceRunAfterSteer({
+    const run = await replaceRunAfterSteer({
       previousRunId: "run-frozen-old",
       nextRunId: "run-frozen-new",
       fallback: previous,
@@ -455,7 +459,7 @@ describe("subagent registry steer restarts", () => {
     expect(run.cleanupHandled).toBe(false);
   });
 
-  it("preserves cumulative session timing across steer replacement runs", () => {
+  it("preserves cumulative session timing across steer replacement runs", async () => {
     registerRun({
       runId: "run-runtime-old",
       childSessionKey: "agent:main:subagent:runtime",
@@ -474,7 +478,7 @@ describe("subagent registry steer restarts", () => {
     previous.accumulatedRuntimeMs = 0;
     previous.outcome = { status: "ok" };
 
-    const replaced = mod.replaceSubagentRunAfterSteer({
+    const replaced = await mod.replaceSubagentRunAfterSteer({
       previousRunId: "run-runtime-old",
       nextRunId: "run-runtime-new",
       fallback: previous,
@@ -493,7 +497,7 @@ describe("subagent registry steer restarts", () => {
     expect(mod.getSubagentSessionRuntimeMs(next, next.endedAt)).toBe(150_000);
   });
 
-  it("preserves frozen completion as fallback when replacing for wake continuation", () => {
+  it("preserves frozen completion as fallback when replacing for wake continuation", async () => {
     registerRun({
       runId: "run-wake-old",
       childSessionKey: "agent:main:subagent:wake",
@@ -507,7 +511,7 @@ describe("subagent registry steer restarts", () => {
       previous.frozenResultCapturedAt = 1234;
     }
 
-    const replaced = mod.replaceSubagentRunAfterSteer({
+    const replaced = await mod.replaceSubagentRunAfterSteer({
       previousRunId: "run-wake-old",
       nextRunId: "run-wake-new",
       fallback: previous,
@@ -553,6 +557,15 @@ describe("subagent registry steer restarts", () => {
       childSessionKey,
       task: "kill me",
     });
+    const registered = listMainRuns()[0];
+    if (!registered) {
+      throw new Error("missing registered run");
+    }
+    mod.addSubagentRunForTests({
+      ...registered,
+      recoveryState: "recovering",
+      recoveryStartedAt: Date.now(),
+    });
 
     expect(mod.isSubagentSessionRunActive(childSessionKey)).toBe(true);
     const updated = mod.markSubagentRunTerminated({
@@ -570,6 +583,18 @@ describe("subagent registry steer restarts", () => {
     expect(run?.outcome?.endedAt).toBeGreaterThanOrEqual(run?.outcome?.startedAt ?? 0);
     expect(run?.cleanupHandled).toBe(true);
     expect(typeof run?.cleanupCompletedAt).toBe("number");
+    expect(run?.recoveryState).toBeUndefined();
+    expect(run?.recoveryStartedAt).toBeUndefined();
+    expect(resolveSubagentWorkflowProjection(run!, 0)).toMatchObject({
+      state: "killed",
+      terminal: true,
+      active: false,
+    });
+    expect(findTaskByRunId("run-killed")).toMatchObject({
+      status: "cancelled",
+      error: "manual kill",
+      deliveryStatus: "not_applicable",
+    });
     await flushAnnounce();
     expect(runSubagentEndedHookMock).toHaveBeenCalledWith(
       {

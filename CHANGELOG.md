@@ -10,6 +10,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- Agents/subagents: keep yielded, interrupted, and recovering nested workflows nonterminal across task, session, status, and subagent projections; persist and repair crash-safe recovery remaps; cancel durable tasks on explicit kills; expose shared workflow state plus pending-descendant counts; and add atomic `sessions_spawn` stage admission so coordinators cannot execute the same logical stage twice concurrently.
 - Docker: use the standard runtime for the custom Compose gateway and disable nested Docker by default, avoiding Sysbox/containerd package conflicts while keeping the legacy Sysbox path available as an explicit opt-in.
 - Gateway: pass agent-scoped media roots to gateway-executed message actions so a non-default agent's workspace media (e.g. Telegram sends) is no longer rejected as cross-agent access.
 - Release/plugin publishing: retry transient ClawHub CLI dependency install failures, keep preview-passing plugins publishable when one preview cell flakes, and verify every expected ClawHub package version after publish so maintenance releases are faster to recover and less likely to hide partial plugin publishes.

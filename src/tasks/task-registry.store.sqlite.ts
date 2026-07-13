@@ -14,6 +14,9 @@ type TaskRegistryRow = {
   runtime: TaskRecord["runtime"];
   task_kind: string | null;
   source_id: string | null;
+  stage_key: string | null;
+  stage_lease_expires_at: number | bigint | null;
+  recovery_admission_run_id: string | null;
   requester_session_key: string | null;
   owner_key: string;
   scope_kind: TaskRecord["scopeKind"];
@@ -100,6 +103,7 @@ function rowToTaskRecord(row: TaskRegistryRow): TaskRecord {
   const endedAt = normalizeNumber(row.ended_at);
   const lastEventAt = normalizeNumber(row.last_event_at);
   const cleanupAfter = normalizeNumber(row.cleanup_after);
+  const stageLeaseExpiresAt = normalizeNumber(row.stage_lease_expires_at);
   const requesterSessionKey =
     row.scope_kind === "system" ? "" : row.requester_session_key?.trim() || row.owner_key;
   return {
@@ -107,6 +111,11 @@ function rowToTaskRecord(row: TaskRegistryRow): TaskRecord {
     runtime: row.runtime,
     ...(row.task_kind ? { taskKind: row.task_kind } : {}),
     ...(row.source_id ? { sourceId: row.source_id } : {}),
+    ...(row.stage_key ? { stageKey: row.stage_key } : {}),
+    ...(stageLeaseExpiresAt != null ? { stageLeaseExpiresAt } : {}),
+    ...(row.recovery_admission_run_id
+      ? { recoveryAdmissionRunId: row.recovery_admission_run_id }
+      : {}),
     requesterSessionKey,
     ownerKey: row.owner_key,
     scopeKind: row.scope_kind,
@@ -148,6 +157,9 @@ function bindTaskRecordBase(record: TaskRecord) {
     runtime: record.runtime,
     task_kind: record.taskKind ?? null,
     source_id: record.sourceId ?? null,
+    stage_key: record.stageKey ?? null,
+    stage_lease_expires_at: record.stageLeaseExpiresAt ?? null,
+    recovery_admission_run_id: record.recoveryAdmissionRunId ?? null,
     requester_session_key: record.scopeKind === "system" ? "" : record.requesterSessionKey,
     owner_key: record.ownerKey,
     scope_kind: record.scopeKind,
@@ -189,6 +201,9 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         runtime,
         task_kind,
         source_id,
+        stage_key,
+        stage_lease_expires_at,
+        recovery_admission_run_id,
         requester_session_key,
         owner_key,
         scope_kind,
@@ -228,6 +243,9 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         runtime,
         task_kind,
         source_id,
+        stage_key,
+        stage_lease_expires_at,
+        recovery_admission_run_id,
         requester_session_key,
         owner_key,
         scope_kind,
@@ -255,6 +273,9 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         @runtime,
         @task_kind,
         @source_id,
+        @stage_key,
+        @stage_lease_expires_at,
+        @recovery_admission_run_id,
         @requester_session_key,
         @owner_key,
         @scope_kind,
@@ -282,6 +303,9 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
         runtime = excluded.runtime,
         task_kind = excluded.task_kind,
         source_id = excluded.source_id,
+        stage_key = excluded.stage_key,
+        stage_lease_expires_at = excluded.stage_lease_expires_at,
+        recovery_admission_run_id = excluded.recovery_admission_run_id,
         requester_session_key = excluded.requester_session_key,
         owner_key = excluded.owner_key,
         scope_kind = excluded.scope_kind,
@@ -377,6 +401,9 @@ function ensureSchema(db: DatabaseSync) {
       runtime TEXT NOT NULL,
       task_kind TEXT,
       source_id TEXT,
+      stage_key TEXT,
+      stage_lease_expires_at INTEGER,
+      recovery_admission_run_id TEXT,
       requester_session_key TEXT,
       owner_key TEXT NOT NULL,
       scope_kind TEXT NOT NULL,
@@ -405,6 +432,15 @@ function ensureSchema(db: DatabaseSync) {
   if (!hasTaskRunsColumn(db, "task_kind")) {
     db.exec(`ALTER TABLE task_runs ADD COLUMN task_kind TEXT;`);
   }
+  if (!hasTaskRunsColumn(db, "stage_key")) {
+    db.exec(`ALTER TABLE task_runs ADD COLUMN stage_key TEXT;`);
+  }
+  if (!hasTaskRunsColumn(db, "stage_lease_expires_at")) {
+    db.exec(`ALTER TABLE task_runs ADD COLUMN stage_lease_expires_at INTEGER;`);
+  }
+  if (!hasTaskRunsColumn(db, "recovery_admission_run_id")) {
+    db.exec(`ALTER TABLE task_runs ADD COLUMN recovery_admission_run_id TEXT;`);
+  }
   if (!hasTaskRunsColumn(db, "parent_flow_id")) {
     db.exec(`ALTER TABLE task_runs ADD COLUMN parent_flow_id TEXT;`);
   }
@@ -422,6 +458,11 @@ function ensureSchema(db: DatabaseSync) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_last_event_at ON task_runs(last_event_at);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_owner_key ON task_runs(owner_key);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_parent_flow_id ON task_runs(parent_flow_id);`);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_active_stage
+    ON task_runs(runtime, owner_key, stage_key)
+    WHERE stage_key IS NOT NULL AND status IN ('queued', 'running');
+  `);
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_task_runs_child_session_key ON task_runs(child_session_key);`,
   );

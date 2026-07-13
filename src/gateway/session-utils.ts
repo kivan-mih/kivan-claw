@@ -29,15 +29,16 @@ import {
 import {
   buildSubagentRunReadIndex,
   countActiveDescendantRuns,
+  countPendingDescendantRuns,
   getSessionDisplaySubagentRunByChildSessionKey,
   getSubagentSessionRuntimeMs,
   getSubagentSessionStartedAt,
-  isSubagentRunLive,
   listSubagentRunsForController,
   resolveSubagentSessionStatus,
 } from "../agents/subagent-registry-read.js";
 import {
   RECENT_ENDED_SUBAGENT_CHILD_SESSION_MS,
+  resolveSubagentWorkflowProjection,
   shouldKeepSubagentRunChildLink,
 } from "../agents/subagent-run-liveness.js";
 import { listThinkingLevelOptions } from "../auto-reply/thinking.js";
@@ -1495,45 +1496,46 @@ export function buildGatewaySessionRow(params: {
   const subagentOwner =
     normalizeOptionalString(subagentRun?.controllerSessionKey) ||
     normalizeOptionalString(subagentRun?.requesterSessionKey);
-  const liveSubagentRunActive = isSubagentRunLive(subagentRun);
   const persistedSessionStatus = entry?.status;
   const persistedSessionEndedAt = entry?.endedAt;
   const persistedSessionStartedAt = entry?.startedAt;
   const persistedSessionRuntimeMs = entry?.runtimeMs;
-  const subagentRunState = subagentRun
-    ? liveSubagentRunActive
+  const pendingDescendants = subagentRun
+    ? rowContext
+      ? rowContext.subagentRuns.countPendingDescendantRuns(key)
+      : countPendingDescendantRuns(key)
+    : undefined;
+  const workflow = subagentRun
+    ? resolveSubagentWorkflowProjection(subagentRun, pendingDescendants ?? 0, now)
+    : undefined;
+  const subagentRunState = workflow
+    ? workflow.active
       ? "active"
-      : typeof subagentRun.endedAt === "number" ||
-          persistedSessionStatus === "done" ||
-          persistedSessionStatus === "failed" ||
-          persistedSessionStatus === "killed" ||
-          persistedSessionStatus === "timeout" ||
-          typeof persistedSessionEndedAt === "number"
-        ? "historical"
-        : "interrupted"
+      : workflow.state === "interrupted"
+        ? "interrupted"
+        : "historical"
     : undefined;
   const subagentStatus = subagentRun
-    ? liveSubagentRunActive
-      ? resolveSubagentSessionStatus(subagentRun)
-      : persistedSessionStatus === "running"
-        ? undefined
-        : (persistedSessionStatus ??
-          (typeof subagentRun.endedAt === "number"
-            ? resolveSubagentSessionStatus(subagentRun)
-            : undefined))
+    ? workflow?.active
+      ? "running"
+      : workflow?.terminal
+        ? resolveSubagentSessionStatus(subagentRun)
+        : persistedSessionStatus === "running"
+          ? undefined
+          : persistedSessionStatus
     : undefined;
   const subagentStartedAt = subagentRun
-    ? liveSubagentRunActive
+    ? workflow?.active
       ? getSubagentSessionStartedAt(subagentRun)
       : (persistedSessionStartedAt ?? getSubagentSessionStartedAt(subagentRun))
     : undefined;
   const subagentEndedAt = subagentRun
-    ? liveSubagentRunActive
-      ? subagentRun.endedAt
+    ? workflow?.active
+      ? undefined
       : (persistedSessionEndedAt ?? subagentRun.endedAt)
     : undefined;
   const subagentRuntimeMs = subagentRun
-    ? liveSubagentRunActive
+    ? workflow?.active
       ? resolveSessionRuntimeMs(subagentRun, now)
       : (persistedSessionRuntimeMs ??
         (typeof subagentRun.endedAt === "number"
@@ -1718,7 +1720,10 @@ export function buildGatewaySessionRow(params: {
     estimatedCostUsd,
     status: subagentRun ? subagentStatus : entry?.status,
     subagentRunState,
-    hasActiveSubagentRun: subagentRun ? liveSubagentRunActive : undefined,
+    hasActiveSubagentRun: workflow?.active,
+    workflowState: workflow?.state,
+    workflowTerminal: workflow?.terminal,
+    pendingDescendants,
     startedAt: subagentRun ? subagentStartedAt : entry?.startedAt,
     endedAt: subagentRun ? subagentEndedAt : entry?.endedAt,
     runtimeMs: subagentRun ? subagentRuntimeMs : entry?.runtimeMs,

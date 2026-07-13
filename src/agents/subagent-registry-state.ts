@@ -7,8 +7,9 @@ import type { SubagentRunRecord } from "./subagent-registry.types.js";
 export function persistSubagentRunsToDisk(runs: Map<string, SubagentRunRecord>) {
   try {
     saveSubagentRegistryToDisk(runs);
+    return true;
   } catch {
-    // ignore persistence failures
+    return false;
   }
 }
 

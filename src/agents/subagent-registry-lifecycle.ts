@@ -255,6 +255,13 @@ export function createSubagentRegistryLifecycleController(params: {
     }
   };
 
+  const safeFinalizeSettledSubagentTaskRun = (entry: SubagentRunRecord) => {
+    if (!entry.outcome || params.countPendingDescendantRuns(entry.childSessionKey) > 0) {
+      return;
+    }
+    safeFinalizeSubagentTaskRun({ entry, outcome: entry.outcome });
+  };
+
   const freezeRunResultAtCompletion = async (
     entry: SubagentRunRecord,
     outcome: SubagentRunOutcome,
@@ -422,6 +429,7 @@ export function createSubagentRegistryLifecycleController(params: {
     entry: SubagentRunRecord;
     reason: "retry-limit" | "expiry";
   }) => {
+    safeFinalizeSettledSubagentTaskRun(giveUpParams.entry);
     clearPendingFinalDelivery(giveUpParams.entry);
     safeSetSubagentTaskDeliveryStatus({
       runId: giveUpParams.runId,
@@ -472,6 +480,10 @@ export function createSubagentRegistryLifecycleController(params: {
       if (typeof entry.endedAt !== "number") {
         continue;
       }
+      // Descendant cleanup can be the first point where a previously ended
+      // parent becomes workflow-terminal. Reconcile its task even when the
+      // parent's own announce cleanup already hit its hard expiry.
+      safeFinalizeSettledSubagentTaskRun(entry);
       if (entry.cleanupCompletedAt || entry.cleanupHandled) {
         continue;
       }
@@ -584,6 +596,7 @@ export function createSubagentRegistryLifecycleController(params: {
     if (!entry) {
       return;
     }
+    safeFinalizeSettledSubagentTaskRun(entry);
     if (didAnnounce) {
       if (!options?.skipAnnounce) {
         entry.completionAnnouncedAt = Date.now();
@@ -883,6 +896,11 @@ export function createSubagentRegistryLifecycleController(params: {
       entry.pauseReason = undefined;
       mutated = true;
     }
+    if (entry.recoveryState !== undefined || entry.recoveryStartedAt !== undefined) {
+      entry.recoveryState = undefined;
+      entry.recoveryStartedAt = undefined;
+      mutated = true;
+    }
 
     if (await freezeRunResultAtCompletion(entry, outcome)) {
       mutated = true;
@@ -891,10 +909,7 @@ export function createSubagentRegistryLifecycleController(params: {
     if (mutated) {
       params.persist();
     }
-    safeFinalizeSubagentTaskRun({
-      entry,
-      outcome,
-    });
+    safeFinalizeSettledSubagentTaskRun(entry);
 
     try {
       await persistSubagentSessionTiming(entry);

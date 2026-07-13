@@ -505,6 +505,20 @@ describe("session_status tool", () => {
         status: "running",
       },
     });
+    listTasksForRelatedSessionKeyForOwnerMock.mockReturnValue([
+      {
+        taskId: "task-current-controller",
+        runtime: "subagent",
+        requesterSessionKey: "agent:main:telegram:default:direct:1234",
+        ownerKey: "agent:main:telegram:default:direct:1234",
+        scopeKind: "session",
+        task: "Wait for the Planner",
+        status: "running",
+        deliveryStatus: "pending",
+        notifyPolicy: "done_only",
+        createdAt: TASK_STATUS_SNAPSHOT_NOW - 5_000,
+      },
+    ]);
 
     // Default visibility is "tree". The tool is constructed with the Telegram
     // sandbox key as agentSessionKey but the live run session key as runSessionKey.
@@ -516,9 +530,14 @@ describe("session_status tool", () => {
     });
 
     const result = await tool.execute("call-current-run-session", { sessionKey: "current" });
-    const details = result.details as { ok?: boolean; sessionKey?: string };
+    const details = result.details as { ok?: boolean; sessionKey?: string; statusText?: string };
     expect(details.ok).toBe(true);
     expect(details.sessionKey).toBe("agent:main:main");
+    expect(details.statusText).toContain("📌 Tasks: 1 active");
+    expect(listTasksForRelatedSessionKeyForOwnerMock).toHaveBeenCalledWith({
+      relatedSessionKey: "agent:main:telegram:default:direct:1234",
+      callerOwnerKey: "agent:main:telegram:default:direct:1234",
+    });
   });
 
   it("synthesizes semantic current from runSessionKey when the live run is not persisted yet", async () => {

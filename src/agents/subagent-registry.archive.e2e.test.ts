@@ -259,7 +259,7 @@ describe("subagent registry archive behavior", () => {
     expect(run?.archiveAtMs).toBeUndefined();
   });
 
-  it("keeps archiveAtMs unset when replacing a keep-mode run after steer restart", () => {
+  it("keeps archiveAtMs unset when replacing a keep-mode run after steer restart", async () => {
     mod.registerSubagentRun({
       runId: "run-old",
       childSessionKey: "agent:main:subagent:run-1",
@@ -269,7 +269,7 @@ describe("subagent registry archive behavior", () => {
       cleanup: "keep",
     });
 
-    const replaced = mod.replaceSubagentRunAfterSteer({
+    const replaced = await mod.replaceSubagentRunAfterSteer({
       previousRunId: "run-old",
       nextRunId: "run-new",
     });
@@ -298,7 +298,7 @@ describe("subagent registry archive behavior", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    const replaced = mod.replaceSubagentRunAfterSteer({
+    const replaced = await mod.replaceSubagentRunAfterSteer({
       previousRunId: "run-delete-old",
       nextRunId: "run-delete-new",
     });
@@ -329,7 +329,7 @@ describe("subagent registry archive behavior", () => {
       attachmentsDir,
     });
 
-    const replaced = mod.replaceSubagentRunAfterSteer({
+    const replaced = await mod.replaceSubagentRunAfterSteer({
       previousRunId: "run-delete-attachments-old",
       nextRunId: "run-delete-attachments-new",
     });

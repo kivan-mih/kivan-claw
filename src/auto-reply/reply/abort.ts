@@ -2,11 +2,13 @@ import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { abortEmbeddedPiRun } from "../../agents/pi-embedded-runner/runs.js";
 import {
+  countPendingDescendantRuns,
   getLatestSubagentRunByChildSessionKey,
   listSubagentRunsForController,
   markSubagentRunTerminated,
 } from "../../agents/subagent-registry.js";
 import type { SubagentRunRecord } from "../../agents/subagent-registry.js";
+import { resolveSubagentWorkflowProjection } from "../../agents/subagent-run-liveness.js";
 import {
   resolveInternalSessionKey,
   resolveMainSessionAlias,
@@ -58,6 +60,7 @@ export {
 const defaultAbortDeps = {
   getAcpSessionManager,
   abortEmbeddedPiRun,
+  countPendingDescendantRuns,
   getLatestSubagentRunByChildSessionKey,
   listSubagentRunsForController,
   markSubagentRunTerminated,
@@ -72,6 +75,8 @@ export const __testing = {
     abortDeps.getAcpSessionManager =
       deps?.getAcpSessionManager ?? defaultAbortDeps.getAcpSessionManager;
     abortDeps.abortEmbeddedPiRun = deps?.abortEmbeddedPiRun ?? defaultAbortDeps.abortEmbeddedPiRun;
+    abortDeps.countPendingDescendantRuns =
+      deps?.countPendingDescendantRuns ?? defaultAbortDeps.countPendingDescendantRuns;
     abortDeps.getLatestSubagentRunByChildSessionKey =
       deps?.getLatestSubagentRunByChildSessionKey ??
       defaultAbortDeps.getLatestSubagentRunByChildSessionKey;
@@ -83,6 +88,7 @@ export const __testing = {
   resetDepsForTests(): void {
     abortDeps.getAcpSessionManager = defaultAbortDeps.getAcpSessionManager;
     abortDeps.abortEmbeddedPiRun = defaultAbortDeps.abortEmbeddedPiRun;
+    abortDeps.countPendingDescendantRuns = defaultAbortDeps.countPendingDescendantRuns;
     abortDeps.getLatestSubagentRunByChildSessionKey =
       defaultAbortDeps.getLatestSubagentRunByChildSessionKey;
     abortDeps.listSubagentRunsForController = defaultAbortDeps.listSubagentRunsForController;
@@ -182,7 +188,11 @@ export function stopSubagentsForRequester(params: {
     }
     seenChildKeys.add(childKey);
 
-    if (!run.endedAt) {
+    const workflow = resolveSubagentWorkflowProjection(
+      run,
+      abortDeps.countPendingDescendantRuns(childKey),
+    );
+    if (!workflow.terminal) {
       const cleared = clearSessionQueues([childKey]);
       const parsed = parseAgentSessionKey(childKey);
       const storePath = resolveStorePath(params.cfg.session?.store, { agentId: parsed?.agentId });

@@ -40,10 +40,14 @@ type SessionsListDetails = {
     };
     elevatedLevel?: string;
     fastMode?: boolean;
+    hasActiveSubagentRun?: boolean;
+    pendingDescendants?: number;
     reasoningLevel?: string;
     responseUsage?: string;
     thinkingLevel?: string;
     verboseLevel?: string;
+    workflowState?: string;
+    workflowTerminal?: boolean;
   }>;
 };
 
@@ -197,6 +201,35 @@ describe("sessions-list-tool", () => {
       reasoningLevel: "deep",
       elevatedLevel: "on",
       responseUsage: "full",
+    });
+  });
+
+  it("keeps authoritative subagent workflow metadata in sessions_list results", async () => {
+    mocks.gatewayCall.mockResolvedValue({
+      path: "/tmp/sessions.json",
+      sessions: [
+        {
+          key: "agent:main:subagent:coordinator",
+          kind: "direct",
+          sessionId: "sess-coordinator",
+          status: "running",
+          subagentRunState: "active",
+          hasActiveSubagentRun: true,
+          workflowState: "waiting_children",
+          workflowTerminal: false,
+          pendingDescendants: 1,
+        },
+      ],
+    });
+    const tool = createSessionsListTool({ config: {} as never });
+
+    const result = await tool.execute("call-workflow", {});
+
+    expect(getSessionsListDetails(result).sessions?.[0]).toMatchObject({
+      hasActiveSubagentRun: true,
+      workflowState: "waiting_children",
+      workflowTerminal: false,
+      pendingDescendants: 1,
     });
   });
 });

@@ -14,12 +14,18 @@ import {
 } from "./detached-task-runtime-state.js";
 import { cancelTaskById as cancelDetachedTaskRunByIdInCore } from "./runtime-internal.js";
 import {
+  claimDetachedTaskRecoveryAdmission as claimDetachedTaskRecoveryAdmissionFromExecutor,
   completeTaskRunByRunId as completeTaskRunByRunIdFromExecutor,
   createQueuedTaskRun as createQueuedTaskRunFromExecutor,
   createRunningTaskRun as createRunningTaskRunFromExecutor,
   failTaskRunByRunId as failTaskRunByRunIdFromExecutor,
   finalizeTaskRunByRunId as finalizeTaskRunByRunIdFromExecutor,
+  forceFinalizeTaskRunById as forceFinalizeTaskRunByIdFromExecutor,
+  getDetachedTaskById as getDetachedTaskByIdFromExecutor,
+  moveDetachedTaskRecoveryAdmission as moveDetachedTaskRecoveryAdmissionFromExecutor,
+  rebindActiveTaskRun as rebindActiveTaskRunFromExecutor,
   recordTaskRunProgressByRunId as recordTaskRunProgressByRunIdFromExecutor,
+  restoreDetachedTaskRecoveryAdmission as restoreDetachedTaskRecoveryAdmissionFromExecutor,
   setDetachedTaskDeliveryStatusByRunId as setDetachedTaskDeliveryStatusByRunIdFromExecutor,
   startTaskRunByRunId as startTaskRunByRunIdFromExecutor,
 } from "./task-executor.js";
@@ -35,6 +41,7 @@ const DEFAULT_DETACHED_TASK_LIFECYCLE_RUNTIME: DetachedTaskLifecycleRuntime = {
   createRunningTaskRun: createRunningTaskRunFromExecutor,
   startTaskRunByRunId: startTaskRunByRunIdFromExecutor,
   recordTaskRunProgressByRunId: recordTaskRunProgressByRunIdFromExecutor,
+  rebindActiveTaskRun: rebindActiveTaskRunFromExecutor,
   finalizeTaskRunByRunId: finalizeTaskRunByRunIdFromExecutor,
   completeTaskRunByRunId: completeTaskRunByRunIdFromExecutor,
   failTaskRunByRunId: failTaskRunByRunIdFromExecutor,
@@ -91,6 +98,12 @@ export function recordTaskRunProgressByRunId(
   return getDetachedTaskLifecycleRuntime().recordTaskRunProgressByRunId(...args);
 }
 
+export function rebindActiveTaskRun(
+  ...args: Parameters<NonNullable<DetachedTaskLifecycleRuntime["rebindActiveTaskRun"]>>
+): TaskRecord[] {
+  return getDetachedTaskLifecycleRuntime().rebindActiveTaskRun?.(...args) ?? [];
+}
+
 export function finalizeTaskRunByRunId(params: DetachedTaskFinalizeParams): TaskRecord[] {
   const runtime = getDetachedTaskLifecycleRuntime();
   if (runtime.finalizeTaskRunByRunId) {
@@ -103,6 +116,36 @@ export function finalizeTaskRunByRunId(params: DetachedTaskFinalizeParams): Task
     ...params,
     status: params.status,
   });
+}
+
+export function forceFinalizeTaskRunById(
+  ...args: Parameters<typeof forceFinalizeTaskRunByIdFromExecutor>
+): ReturnType<typeof forceFinalizeTaskRunByIdFromExecutor> {
+  return forceFinalizeTaskRunByIdFromExecutor(...args);
+}
+
+export function getDetachedTaskById(
+  ...args: Parameters<typeof getDetachedTaskByIdFromExecutor>
+): ReturnType<typeof getDetachedTaskByIdFromExecutor> {
+  return getDetachedTaskByIdFromExecutor(...args);
+}
+
+export function claimDetachedTaskRecoveryAdmission(
+  ...args: Parameters<typeof claimDetachedTaskRecoveryAdmissionFromExecutor>
+): ReturnType<typeof claimDetachedTaskRecoveryAdmissionFromExecutor> {
+  return claimDetachedTaskRecoveryAdmissionFromExecutor(...args);
+}
+
+export function moveDetachedTaskRecoveryAdmission(
+  ...args: Parameters<typeof moveDetachedTaskRecoveryAdmissionFromExecutor>
+): ReturnType<typeof moveDetachedTaskRecoveryAdmissionFromExecutor> {
+  return moveDetachedTaskRecoveryAdmissionFromExecutor(...args);
+}
+
+export function restoreDetachedTaskRecoveryAdmission(
+  ...args: Parameters<typeof restoreDetachedTaskRecoveryAdmissionFromExecutor>
+): ReturnType<typeof restoreDetachedTaskRecoveryAdmissionFromExecutor> {
+  return restoreDetachedTaskRecoveryAdmissionFromExecutor(...args);
 }
 
 export function completeTaskRunByRunId(

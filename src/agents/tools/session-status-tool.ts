@@ -622,7 +622,7 @@ export function createSessionStatusTool(opts?: {
         resolved.key.includes(":group:") ||
         resolved.key.includes(":channel:");
       const taskLine = formatSessionTaskLine({
-        relatedSessionKey: resolved.key,
+        relatedSessionKey: isSemanticCurrentRequest ? effectiveRequesterKey : resolved.key,
         callerOwnerKey: visibilityRequesterKey,
       });
       const { buildStatusText } = await loadCommandsStatusRuntime();
@@ -630,6 +630,7 @@ export function createSessionStatusTool(opts?: {
         cfg,
         sessionEntry: statusSessionEntry,
         sessionKey: resolved.key,
+        orchestrationSessionKey: isSemanticCurrentRequest ? effectiveRequesterKey : resolved.key,
         parentSessionKey: statusSessionEntry.parentSessionKey,
         sessionScope: cfg.session?.scope,
         storePath,

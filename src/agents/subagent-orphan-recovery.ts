@@ -29,6 +29,14 @@ import {
   loadRequesterSessionEntry,
 } from "./subagent-announce-delivery.js";
 import { resolveAnnounceOrigin } from "./subagent-announce-origin.js";
+import { abortEmbeddedPiRun, clearSessionQueues } from "./subagent-control.runtime.js";
+import {
+  movePreparedSubagentRecoveryAdmission,
+  prepareSubagentRecoveryAdmission,
+  quarantineUncertainSubagentRecovery,
+  rollbackSubagentRecoveryAdmission,
+  type PreparedSubagentRecoveryAdmission,
+} from "./subagent-recovery-admission.js";
 import {
   evaluateSubagentRecoveryGate,
   markSubagentRecoveryAttempt,
@@ -36,9 +44,11 @@ import {
 } from "./subagent-recovery-state.js";
 import {
   finalizeInterruptedSubagentRun,
+  hasPendingSubagentRecoveryRemap,
   replaceSubagentRunAfterSteer,
 } from "./subagent-registry-steer-runtime.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { collectUnresolvedRecoveryRemapRunIds } from "./subagent-run-liveness.js";
 
 const log = createSubsystemLogger("subagent-orphan-recovery");
 
@@ -180,38 +190,87 @@ async function resumeOrphanedSession(params: {
   configChangeHint?: string;
   originalRunId: string;
   originalRun: SubagentRunRecord;
+  sessionId?: string;
 }): Promise<{ resumed: boolean; error?: string }> {
   let resumeMessage = buildResumeMessage(params.task, params.lastHumanMessage);
   if (params.configChangeHint) {
     resumeMessage += params.configChangeHint;
   }
 
+  const idempotencyKey = crypto.randomUUID();
+  let acceptedRunId: string = idempotencyKey;
+  let admission: PreparedSubagentRecoveryAdmission | undefined;
+  let dispatchAttempted = false;
+  const cleanupAcceptedRun = () => {
+    if (params.sessionId) {
+      abortEmbeddedPiRun(params.sessionId);
+    }
+    clearSessionQueues([params.sessionKey, params.sessionId]);
+  };
   try {
+    admission = prepareSubagentRecoveryAdmission({
+      entry: params.originalRun,
+      nextRunId: idempotencyKey,
+    });
+    acceptedRunId = admission.nextRunId;
+    dispatchAttempted = true;
     const result = await callGateway<{ runId: string }>({
       method: "agent",
       params: {
         message: resumeMessage,
         sessionKey: params.sessionKey,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: admission.nextRunId,
         deliver: false,
         lane: "subagent",
       },
       timeoutMs: 10_000,
     });
-    const remapped = replaceSubagentRunAfterSteer({
+    acceptedRunId = result.runId;
+    admission = movePreparedSubagentRecoveryAdmission({
+      entry: params.originalRun,
+      admission,
+      nextRunId: acceptedRunId,
+    });
+    const remapped = await replaceSubagentRunAfterSteer({
       previousRunId: params.originalRunId,
-      nextRunId: result.runId,
+      nextRunId: acceptedRunId,
       fallback: params.originalRun,
     });
     if (!remapped) {
-      log.warn(
-        `resumed orphaned session ${params.sessionKey} but remap failed (old run already removed); treating resume as accepted to avoid duplicate restarts`,
-      );
-      return { resumed: true };
+      if (
+        hasPendingSubagentRecoveryRemap({
+          previousRunId: params.originalRunId,
+          nextRunId: acceptedRunId,
+        })
+      ) {
+        log.warn(
+          `resumed orphaned session ${params.sessionKey}; durable remap reconciliation remains pending`,
+        );
+        return { resumed: true };
+      }
+      cleanupAcceptedRun();
+      quarantineUncertainSubagentRecovery({
+        entry: params.originalRun,
+        runId: acceptedRunId,
+        reason: "Accepted orphan recovery could not be reconciled or synchronously aborted.",
+      });
+      return { resumed: false, error: "accepted recovery run could not be reconciled" };
     }
     log.info(`resumed orphaned session: ${params.sessionKey}`);
     return { resumed: true };
   } catch (err) {
+    if (admission) {
+      if (!dispatchAttempted) {
+        rollbackSubagentRecoveryAdmission({ entry: params.originalRun, admission });
+      } else {
+        cleanupAcceptedRun();
+        quarantineUncertainSubagentRecovery({
+          entry: params.originalRun,
+          runId: acceptedRunId,
+          reason: "Orphan recovery dispatch failed without synchronous abort proof.",
+        });
+      }
+    }
     const error = formatErrorMessage(err);
     log.warn(`failed to resume orphaned session ${params.sessionKey}: ${error}`);
     return { resumed: false, error };
@@ -265,8 +324,13 @@ export async function recoverOrphanedSubagentSessions(params: {
 
     const cfg = getRuntimeConfig();
     const storeCache = new Map<string, Record<string, SessionEntry>>();
+    const pendingRemapRunIds = collectUnresolvedRecoveryRemapRunIds(activeRuns.values());
 
     for (const [runId, runRecord] of activeRuns.entries()) {
+      if (pendingRemapRunIds.has(runId)) {
+        result.skipped++;
+        continue;
+      }
       const childSessionKey = runRecord.childSessionKey?.trim();
       if (!childSessionKey) {
         continue;
@@ -395,6 +459,7 @@ export async function recoverOrphanedSubagentSessions(params: {
             : undefined,
           originalRunId: runId,
           originalRun: runRecord,
+          sessionId: entry.sessionId,
         });
 
         if (resumeResult.resumed) {

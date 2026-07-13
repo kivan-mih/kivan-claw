@@ -1,5 +1,7 @@
 import os from "node:os";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetTaskFlowRegistryForTests } from "../tasks/task-flow-registry.js";
+import { resetTaskRegistryForTests } from "../tasks/task-registry.js";
 import {
   createSubagentSpawnTestConfig,
   expectPersistedRuntimeModel,
@@ -57,6 +59,8 @@ describe("spawnSubagentDirect seam flow", () => {
 
   beforeEach(() => {
     resetSubagentRegistryForTests();
+    resetTaskRegistryForTests();
+    resetTaskFlowRegistryForTests();
     hoisted.callGatewayMock.mockReset();
     hoisted.updateSessionStoreMock.mockReset();
     hoisted.pruneLegacyStoreKeysMock.mockReset();
@@ -80,6 +84,174 @@ describe("spawnSubagentDirect seam flow", () => {
         return store;
       },
     );
+  });
+
+  afterAll(() => {
+    resetTaskRegistryForTests();
+    resetTaskFlowRegistryForTests();
+  });
+
+  it("rejects a duplicate logical stage before dispatching another agent run", async () => {
+    const first = await spawnSubagentDirect(
+      {
+        task: "produce the implementation plan",
+        label: "Planner",
+        stageKey: "planner",
+        onConflict: "reject",
+      },
+      { agentSessionKey: "agent:main:main" },
+    );
+    expect(first).toMatchObject({
+      status: "accepted",
+      runId: "run-1",
+      stageKey: "planner",
+    });
+    const registered = hoisted.registerSubagentRunMock.mock.calls[0]?.[0] as
+      | { taskId?: string; stageKey?: string }
+      | undefined;
+    expect(registered).toMatchObject({
+      taskId: expect.any(String),
+      stageKey: "planner",
+    });
+
+    const duplicate = await spawnSubagentDirect(
+      {
+        task: "produce another implementation plan",
+        label: "Planner duplicate",
+        stageKey: "planner",
+        onConflict: "reject",
+      },
+      { agentSessionKey: "agent:main:main" },
+    );
+
+    expect(duplicate).toMatchObject({
+      status: "error",
+      code: "stage_conflict",
+      stageKey: "planner",
+      incumbent: {
+        taskId: registered?.taskId,
+        runId: "run-1",
+        status: "running",
+      },
+    });
+    expect(
+      hoisted.callGatewayMock.mock.calls.filter(
+        ([request]) => (request as { method?: string }).method === "agent",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps a dispatched stage blocked when failed registration cleanup is uncertain", async () => {
+    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        return { runId: "run-uncertain-cleanup" };
+      }
+      if (request.method === "sessions.delete") {
+        throw new Error("session delete unavailable");
+      }
+      return { ok: true };
+    });
+    hoisted.registerSubagentRunMock.mockImplementation(() => {
+      throw new Error("registry unavailable");
+    });
+
+    const first = await spawnSubagentDirect(
+      { task: "run guarded work", stageKey: "guarded-stage" },
+      { agentSessionKey: "agent:main:main" },
+    );
+    expect(first).toMatchObject({ status: "error", runId: "run-uncertain-cleanup" });
+
+    const duplicate = await spawnSubagentDirect(
+      { task: "duplicate guarded work", stageKey: "guarded-stage" },
+      { agentSessionKey: "agent:main:main" },
+    );
+    expect(duplicate).toMatchObject({
+      status: "error",
+      code: "stage_conflict",
+      incumbent: { runId: "run-uncertain-cleanup", status: "running" },
+    });
+    expect(
+      hoisted.callGatewayMock.mock.calls.filter(
+        ([request]) => (request as { method?: string }).method === "agent",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps a dispatched stage blocked when session deletion reports no deletion", async () => {
+    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        return { runId: "run-not-deleted" };
+      }
+      if (request.method === "sessions.delete") {
+        return { ok: true, deleted: false };
+      }
+      return { ok: true };
+    });
+    hoisted.registerSubagentRunMock.mockImplementation(() => {
+      throw new Error("registry unavailable");
+    });
+
+    const first = await spawnSubagentDirect(
+      { task: "run guarded work", stageKey: "not-deleted-stage" },
+      { agentSessionKey: "agent:main:main" },
+    );
+    expect(first).toMatchObject({ status: "error", runId: "run-not-deleted" });
+
+    const duplicate = await spawnSubagentDirect(
+      { task: "duplicate guarded work", stageKey: "not-deleted-stage" },
+      { agentSessionKey: "agent:main:main" },
+    );
+    expect(duplicate).toMatchObject({
+      status: "error",
+      code: "stage_conflict",
+      incumbent: { runId: "run-not-deleted", status: "running" },
+    });
+    expect(
+      hoisted.callGatewayMock.mock.calls.filter(
+        ([request]) => (request as { method?: string }).method === "agent",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps uncertain dispatch cleanup blocked after the reservation lease would expire", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
+      if (request.method === "agent") {
+        throw new Error("gateway response timed out");
+      }
+      if (request.method === "sessions.delete") {
+        return { ok: true, deleted: false };
+      }
+      return { ok: true };
+    });
+
+    try {
+      const first = await spawnSubagentDirect(
+        { task: "possibly accepted work", stageKey: "lease-quarantine-stage" },
+        { agentSessionKey: "agent:main:main" },
+      );
+      expect(first.status).toBe("error");
+
+      vi.setSystemTime(startedAt + 24 * 60 * 60_000);
+      const duplicate = await spawnSubagentDirect(
+        { task: "late duplicate work", stageKey: "lease-quarantine-stage" },
+        { agentSessionKey: "agent:main:main" },
+      );
+
+      expect(duplicate).toMatchObject({
+        status: "error",
+        code: "stage_conflict",
+        incumbent: { status: "running" },
+      });
+      expect(
+        hoisted.callGatewayMock.mock.calls.filter(
+          ([request]) => (request as { method?: string }).method === "agent",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects explicit same-agent targets when allowAgents excludes the requester", async () => {

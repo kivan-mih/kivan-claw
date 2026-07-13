@@ -23,7 +23,15 @@ import {
 } from "./run-wait.js";
 import { resolveStoredSubagentCapabilities } from "./subagent-capabilities.js";
 import { buildLatestSubagentRunIndex, resolveSessionEntryForKey } from "./subagent-list.js";
+import {
+  movePreparedSubagentRecoveryAdmission,
+  prepareSubagentRecoveryAdmission,
+  isSubagentRecoveryStageDurablyBlocked,
+  quarantineUncertainSubagentRecovery,
+  rollbackSubagentRecoveryAdmission,
+} from "./subagent-recovery-admission.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { countPendingDescendantRunsFromRuns } from "./subagent-registry-queries.js";
 import {
   getLatestSubagentRunByChildSessionKey,
   listSubagentRunsForController,
@@ -37,6 +45,7 @@ import {
   replaceSubagentRunAfterSteer,
 } from "./subagent-registry.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { resolveSubagentWorkflowProjection } from "./subagent-run-liveness.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./tools/sessions-helpers.js";
 
 export const DEFAULT_RECENT_MINUTES = 30;
@@ -157,8 +166,13 @@ async function killSubagentRun(params: {
   cfg: OpenClawConfig;
   entry: SubagentRunRecord;
   cache: Map<string, Record<string, SessionEntry>>;
+  pendingDescendants?: number;
 }): Promise<{ killed: boolean; sessionId?: string }> {
-  if (params.entry.endedAt) {
+  const workflow = resolveSubagentWorkflowProjection(
+    params.entry,
+    params.pendingDescendants ?? countPendingDescendantRuns(params.entry.childSessionKey),
+  );
+  if (workflow.terminal) {
     return { killed: false };
   }
   const childSessionKey = params.entry.childSessionKey;
@@ -207,29 +221,26 @@ async function cascadeKillChildren(params: {
   parentChildSessionKey: string;
   cache: Map<string, Record<string, SessionEntry>>;
   seenChildSessionKeys?: Set<string>;
+  latestRunsByChildSessionKey?: Map<string, SubagentRunRecord>;
+  runsSnapshot?: Map<string, SubagentRunRecord>;
 }): Promise<{ killed: number; labels: string[] }> {
-  const childRunsBySessionKey = new Map<string, SubagentRunRecord>();
-  for (const run of listSubagentRunsForController(params.parentChildSessionKey)) {
+  const runsSnapshot = params.runsSnapshot ?? getSubagentRunsSnapshotForRead(subagentRuns);
+  const latestRunsByChildSessionKey =
+    params.latestRunsByChildSessionKey ??
+    buildLatestSubagentRunIndex(runsSnapshot).latestByChildSessionKey;
+  const childRuns: SubagentRunRecord[] = [];
+  for (const run of latestRunsByChildSessionKey.values()) {
     const childKey = run.childSessionKey?.trim();
     if (!childKey) {
       continue;
     }
-    const latest = getLatestSubagentRunByChildSessionKey(childKey);
-    const latestControllerSessionKey =
-      latest?.controllerSessionKey?.trim() || latest?.requesterSessionKey?.trim();
-    if (
-      !latest ||
-      latest.runId !== run.runId ||
-      latestControllerSessionKey !== params.parentChildSessionKey
-    ) {
+    const controllerSessionKey =
+      run.controllerSessionKey?.trim() || run.requesterSessionKey?.trim();
+    if (controllerSessionKey !== params.parentChildSessionKey) {
       continue;
     }
-    const existing = childRunsBySessionKey.get(childKey);
-    if (!existing || run.createdAt >= existing.createdAt) {
-      childRunsBySessionKey.set(childKey, run);
-    }
+    childRuns.push(run);
   }
-  const childRuns = Array.from(childRunsBySessionKey.values());
   const seenChildSessionKeys = params.seenChildSessionKeys ?? new Set<string>();
   let killed = 0;
   const labels: string[] = [];
@@ -241,11 +252,16 @@ async function cascadeKillChildren(params: {
     }
     seenChildSessionKeys.add(childKey);
 
-    if (!run.endedAt) {
+    const workflow = resolveSubagentWorkflowProjection(
+      run,
+      countPendingDescendantRunsFromRuns(runsSnapshot, run.childSessionKey),
+    );
+    if (!workflow.terminal) {
       const stopResult = await killSubagentRun({
         cfg: params.cfg,
         entry: run,
         cache: params.cache,
+        pendingDescendants: countPendingDescendantRunsFromRuns(runsSnapshot, run.childSessionKey),
       });
       if (stopResult.killed) {
         killed += 1;
@@ -258,6 +274,8 @@ async function cascadeKillChildren(params: {
       parentChildSessionKey: childKey,
       cache: params.cache,
       seenChildSessionKeys,
+      latestRunsByChildSessionKey,
+      runsSnapshot,
     });
     killed += cascade.killed;
     labels.push(...cascade.labels);
@@ -281,6 +299,9 @@ export async function killAllControlledSubagentRuns(params: {
   }
   const cache = new Map<string, Record<string, SessionEntry>>();
   const seenChildSessionKeys = new Set<string>();
+  const runsSnapshot = getSubagentRunsSnapshotForRead(subagentRuns);
+  const latestRunsByChildSessionKey =
+    buildLatestSubagentRunIndex(runsSnapshot).latestByChildSessionKey;
   const killedLabels: string[] = [];
   let killed = 0;
   for (const entry of params.runs) {
@@ -288,14 +309,26 @@ export async function killAllControlledSubagentRuns(params: {
     if (!childKey || seenChildSessionKeys.has(childKey)) {
       continue;
     }
-    const currentEntry = getLatestSubagentRunByChildSessionKey(childKey);
+    const currentEntry = latestRunsByChildSessionKey.get(childKey);
     if (!currentEntry || currentEntry.runId !== entry.runId) {
       continue;
     }
     seenChildSessionKeys.add(childKey);
 
-    if (!currentEntry.endedAt) {
-      const stopResult = await killSubagentRun({ cfg: params.cfg, entry: currentEntry, cache });
+    const workflow = resolveSubagentWorkflowProjection(
+      currentEntry,
+      countPendingDescendantRunsFromRuns(runsSnapshot, currentEntry.childSessionKey),
+    );
+    if (!workflow.terminal) {
+      const stopResult = await killSubagentRun({
+        cfg: params.cfg,
+        entry: currentEntry,
+        cache,
+        pendingDescendants: countPendingDescendantRunsFromRuns(
+          runsSnapshot,
+          currentEntry.childSessionKey,
+        ),
+      });
       if (stopResult.killed) {
         killed += 1;
         killedLabels.push(resolveSubagentLabel(currentEntry));
@@ -307,6 +340,8 @@ export async function killAllControlledSubagentRuns(params: {
       parentChildSessionKey: childKey,
       cache,
       seenChildSessionKeys,
+      latestRunsByChildSessionKey,
+      runsSnapshot,
     });
     killed += cascade.killed;
     killedLabels.push(...cascade.labels);
@@ -350,10 +385,17 @@ export async function killControlledSubagentRun(params: {
     };
   }
   const killCache = new Map<string, Record<string, SessionEntry>>();
+  const runsSnapshot = getSubagentRunsSnapshotForRead(subagentRuns);
+  const latestRunsByChildSessionKey =
+    buildLatestSubagentRunIndex(runsSnapshot).latestByChildSessionKey;
   const stopResult = await killSubagentRun({
     cfg: params.cfg,
     entry: currentEntry,
     cache: killCache,
+    pendingDescendants: countPendingDescendantRunsFromRuns(
+      runsSnapshot,
+      currentEntry.childSessionKey,
+    ),
   });
   const seenChildSessionKeys = new Set<string>();
   const targetChildKey = params.entry.childSessionKey?.trim();
@@ -365,6 +407,8 @@ export async function killControlledSubagentRun(params: {
     parentChildSessionKey: params.entry.childSessionKey,
     cache: killCache,
     seenChildSessionKeys,
+    latestRunsByChildSessionKey,
+    runsSnapshot,
   });
   if (!stopResult.killed && cascade.killed === 0) {
     return {
@@ -401,10 +445,14 @@ export async function killSubagentRunAdmin(params: { cfg: OpenClawConfig; sessio
   }
 
   const killCache = new Map<string, Record<string, SessionEntry>>();
+  const runsSnapshot = getSubagentRunsSnapshotForRead(subagentRuns);
+  const latestRunsByChildSessionKey =
+    buildLatestSubagentRunIndex(runsSnapshot).latestByChildSessionKey;
   const stopResult = await killSubagentRun({
     cfg: params.cfg,
     entry,
     cache: killCache,
+    pendingDescendants: countPendingDescendantRunsFromRuns(runsSnapshot, entry.childSessionKey),
   });
   const seenChildSessionKeys = new Set<string>([targetSessionKey]);
   const cascade = await cascadeKillChildren({
@@ -412,6 +460,8 @@ export async function killSubagentRunAdmin(params: { cfg: OpenClawConfig; sessio
     parentChildSessionKey: targetSessionKey,
     cache: killCache,
     seenChildSessionKeys,
+    latestRunsByChildSessionKey,
+    runsSnapshot,
   });
 
   return {
@@ -468,8 +518,12 @@ export async function steerControlledSubagentRun(params: {
       error: "Leaf subagents cannot control other sessions.",
     };
   }
-  const targetHasPendingDescendants = countPendingDescendantRuns(params.entry.childSessionKey) > 0;
-  if (params.entry.endedAt && !targetHasPendingDescendants) {
+  if (
+    resolveSubagentWorkflowProjection(
+      params.entry,
+      countPendingDescendantRuns(params.entry.childSessionKey),
+    ).terminal
+  ) {
     return {
       status: "done",
       runId: params.entry.runId,
@@ -486,12 +540,13 @@ export async function steerControlledSubagentRun(params: {
     };
   }
   const currentEntry = getLatestSubagentRunByChildSessionKey(params.entry.childSessionKey);
-  const currentHasPendingDescendants =
-    currentEntry && countPendingDescendantRuns(currentEntry.childSessionKey) > 0;
   if (
     !currentEntry ||
     currentEntry.runId !== params.entry.runId ||
-    (currentEntry.endedAt && !currentHasPendingDescendants)
+    resolveSubagentWorkflowProjection(
+      currentEntry,
+      countPendingDescendantRuns(currentEntry.childSessionKey),
+    ).terminal
   ) {
     return {
       status: "done",
@@ -555,14 +610,39 @@ export async function steerControlledSubagentRun(params: {
 
   const idempotencyKey = crypto.randomUUID();
   let runId: string = idempotencyKey;
+  let recoveryAdmission;
   try {
+    recoveryAdmission = prepareSubagentRecoveryAdmission({
+      entry: params.entry,
+      nextRunId: idempotencyKey,
+    });
+    runId = recoveryAdmission.nextRunId;
+  } catch (error) {
+    clearSubagentRunSteerRestart(params.entry.runId);
+    return {
+      status: "error" as const,
+      runId,
+      sessionKey: params.entry.childSessionKey,
+      sessionId,
+      error: formatErrorMessage(error),
+    };
+  }
+  const cleanupAcceptedRecoveryRun = () => {
+    if (sessionId) {
+      runtime.abortEmbeddedPiRun(sessionId);
+    }
+    runtime.clearSessionQueues([params.entry.childSessionKey, sessionId]);
+  };
+  let dispatchAttempted = false;
+  try {
+    dispatchAttempted = true;
     const response = await subagentControlDeps.callGateway<{ runId: string }>({
       method: "agent",
       params: {
         message: params.message,
         sessionKey: params.entry.childSessionKey,
         sessionId,
-        idempotencyKey,
+        idempotencyKey: recoveryAdmission.nextRunId,
         deliver: false,
         channel: INTERNAL_MESSAGE_CHANNEL,
         lane: AGENT_LANE_SUBAGENT,
@@ -573,7 +653,22 @@ export async function steerControlledSubagentRun(params: {
     if (typeof response?.runId === "string" && response.runId) {
       runId = response.runId;
     }
+    recoveryAdmission = movePreparedSubagentRecoveryAdmission({
+      entry: params.entry,
+      admission: recoveryAdmission,
+      nextRunId: runId,
+    });
   } catch (err) {
+    if (!dispatchAttempted) {
+      rollbackSubagentRecoveryAdmission({ entry: params.entry, admission: recoveryAdmission });
+    } else {
+      cleanupAcceptedRecoveryRun();
+      quarantineUncertainSubagentRecovery({
+        entry: params.entry,
+        runId,
+        reason: "Recovery dispatch failed without synchronous abort proof.",
+      });
+    }
     clearSubagentRunSteerRestart(params.entry.runId);
     const error = formatErrorMessage(err);
     return {
@@ -585,13 +680,37 @@ export async function steerControlledSubagentRun(params: {
     };
   }
 
-  const replaced = replaceSubagentRunAfterSteer({
+  const replaced = await replaceSubagentRunAfterSteer({
     previousRunId: params.entry.runId,
     nextRunId: runId,
     fallback: params.entry,
     runTimeoutSeconds: params.entry.runTimeoutSeconds ?? 0,
   });
   if (!replaced) {
+    const pendingEntry = subagentRuns.get(runId);
+    const pendingRemap = pendingEntry?.recoveryRemap;
+    if (
+      pendingEntry &&
+      pendingRemap?.previousRunId === params.entry.runId &&
+      pendingRemap.nextRunId === runId &&
+      isSubagentRecoveryStageDurablyBlocked(pendingEntry)
+    ) {
+      return {
+        status: "accepted" as const,
+        runId,
+        sessionKey: params.entry.childSessionKey,
+        sessionId,
+        mode: "restart" as const,
+        label: resolveSubagentLabel(params.entry),
+        text: `steered ${resolveSubagentLabel(params.entry)}; recovery reconciliation is pending.`,
+      };
+    }
+    cleanupAcceptedRecoveryRun();
+    quarantineUncertainSubagentRecovery({
+      entry: params.entry,
+      runId,
+      reason: "Accepted recovery run could not be reconciled or synchronously aborted.",
+    });
     clearSubagentRunSteerRestart(params.entry.runId);
     return {
       status: "error",

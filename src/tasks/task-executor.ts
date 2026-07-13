@@ -4,10 +4,12 @@ import type {
   DetachedRunningTaskCreateParams,
   DetachedTaskCreateParams,
   DetachedTaskFinalizeParams,
+  DetachedTaskRebindParams,
 } from "./detached-task-runtime-contract.js";
 import { getRegisteredDetachedTaskLifecycleRuntime } from "./detached-task-runtime-state.js";
 import {
   cancelTaskById,
+  claimTaskRecoveryAdmission as claimTaskRecoveryAdmissionInRegistry,
   createTaskRecord,
   findLatestTaskForFlowId,
   getTaskById,
@@ -16,8 +18,12 @@ import {
   listTasksForFlowId,
   markTaskLostById,
   markTaskRunningByRunId,
+  markTaskTerminalById,
+  moveTaskRecoveryAdmission as moveTaskRecoveryAdmissionInRegistry,
+  rebindActiveTaskRun as rebindActiveTaskRunInRegistry,
   finalizeTaskRunByRunId as finalizeTaskRunByRunIdInRegistry,
   recordTaskProgressByRunId,
+  restoreTaskRecoveryAdmission as restoreTaskRecoveryAdmissionInRegistry,
   setTaskRunDeliveryStatusByRunId,
 } from "./runtime-internal.js";
 import { getTaskFlowByIdForOwner } from "./task-flow-owner-access.js";
@@ -42,6 +48,34 @@ import type {
 } from "./task-registry.types.js";
 
 const log = createSubsystemLogger("tasks/executor");
+
+export function forceFinalizeTaskRunById(
+  params: Parameters<typeof markTaskTerminalById>[0],
+): TaskRecord | null {
+  return markTaskTerminalById(params);
+}
+
+export function getDetachedTaskById(taskId: string): TaskRecord | undefined {
+  return getTaskById(taskId);
+}
+
+export function claimDetachedTaskRecoveryAdmission(
+  params: Parameters<typeof claimTaskRecoveryAdmissionInRegistry>[0],
+): TaskRecord | null {
+  return claimTaskRecoveryAdmissionInRegistry(params);
+}
+
+export function moveDetachedTaskRecoveryAdmission(
+  params: Parameters<typeof moveTaskRecoveryAdmissionInRegistry>[0],
+): TaskRecord | null {
+  return moveTaskRecoveryAdmissionInRegistry(params);
+}
+
+export function restoreDetachedTaskRecoveryAdmission(
+  params: Parameters<typeof restoreTaskRecoveryAdmissionInRegistry>[0],
+): TaskRecord | null {
+  return restoreTaskRecoveryAdmissionInRegistry(params);
+}
 
 function isOneTaskFlowEligible(task: TaskRecord): boolean {
   if (task.parentFlowId?.trim() || task.scopeKind !== "session") {
@@ -157,6 +191,10 @@ export function recordTaskRunProgressByRunId(params: {
   eventSummary?: string | null;
 }) {
   return recordTaskProgressByRunId(params);
+}
+
+export function rebindActiveTaskRun(params: DetachedTaskRebindParams) {
+  return rebindActiveTaskRunInRegistry(params);
 }
 
 export function completeTaskRunByRunId(params: {

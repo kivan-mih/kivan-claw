@@ -58,6 +58,7 @@ type LatestRunPair = {
 export type SubagentRunReadIndex = {
   getDisplaySubagentRun(childSessionKey: string): SubagentRunRecord | null;
   countActiveDescendantRuns(rootSessionKey: string): number;
+  countPendingDescendantRuns(rootSessionKey: string): number;
   runsByControllerSessionKey: ReadonlyMap<string, readonly SubagentRunRecord[]>;
 };
 
@@ -228,9 +229,25 @@ export function buildSubagentRunReadIndexFromRuns(params: {
     return count;
   };
 
+  const pendingDescendantCountBySessionKey = new Map<string, number>();
+  const countPendingDescendantRuns = (rootSessionKey: string): number => {
+    const root = rootSessionKey.trim();
+    if (!root) {
+      return 0;
+    }
+    const cached = pendingDescendantCountBySessionKey.get(root);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const count = countPendingDescendantRunsInternal(runs, root);
+    pendingDescendantCountBySessionKey.set(root, count);
+    return count;
+  };
+
   return {
     getDisplaySubagentRun,
     countActiveDescendantRuns,
+    countPendingDescendantRuns,
     runsByControllerSessionKey,
   };
 }
@@ -442,7 +459,10 @@ function countPendingDescendantRunsInternal(
     !forEachDescendantRun(runs, rootSessionKey, (runId, entry) => {
       const runEnded = hasSubagentRunEnded(entry);
       const cleanupCompleted = typeof entry.cleanupCompletedAt === "number";
-      const runPending = runEnded ? !cleanupCompleted : isLiveUnendedSubagentRun(entry);
+      // Staleness changes the display/concurrency projection, not lifecycle
+      // ownership. An unended descendant remains pending until the sweeper
+      // explicitly terminalizes it and cleanup completes.
+      const runPending = !runEnded || !cleanupCompleted;
       if (runPending && runId !== excludedRunId) {
         count += 1;
       }
