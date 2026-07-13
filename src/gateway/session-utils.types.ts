@@ -1,3 +1,4 @@
+import type { SubagentWorkflowState } from "../agents/subagent-run-liveness.js";
 import type { ChatType } from "../channels/chat-type.js";
 import type { SessionCompactionCheckpoint, SessionEntry } from "../config/sessions/types.js";
 import type { PluginSessionExtensionProjection } from "../plugins/host-hooks.js";
@@ -74,6 +75,9 @@ export type GatewaySessionRow = {
   hasActiveRun?: boolean;
   subagentRunState?: SubagentRunState;
   hasActiveSubagentRun?: boolean;
+  workflowState?: SubagentWorkflowState;
+  workflowTerminal?: boolean;
+  pendingDescendants?: number;
   startedAt?: number;
   endedAt?: number;
   runtimeMs?: number;

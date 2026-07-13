@@ -55,6 +55,12 @@ export type TaskRecord = {
   runtime: TaskRuntime;
   taskKind?: string;
   sourceId?: string;
+  /** Optional logical stage identity used for nonterminal admission exclusion. */
+  stageKey?: string;
+  /** Expiry for a queued pre-dispatch stage reservation. Cleared once running. */
+  stageLeaseExpiresAt?: number;
+  /** Idempotency/run ID holding a non-expiring queued recovery admission. */
+  recoveryAdmissionRunId?: string;
   requesterSessionKey: string;
   ownerKey: string;
   scopeKind: TaskScopeKind;

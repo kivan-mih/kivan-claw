@@ -3,6 +3,7 @@ import { subagentRuns } from "./subagent-registry-memory.js";
 import {
   buildSubagentRunReadIndexFromRuns,
   countActiveDescendantRunsFromRuns,
+  countPendingDescendantRunsFromRuns,
   getSubagentRunByChildSessionKeyFromRuns,
   listDescendantRunsForRequesterFromRuns,
   listRunsForControllerFromRuns,
@@ -39,6 +40,13 @@ export function listSubagentRunsForController(controllerSessionKey: string): Sub
 
 export function countActiveDescendantRuns(rootSessionKey: string): number {
   return countActiveDescendantRunsFromRuns(
+    getSubagentRunsSnapshotForRead(subagentRuns),
+    rootSessionKey,
+  );
+}
+
+export function countPendingDescendantRuns(rootSessionKey: string): number {
+  return countPendingDescendantRunsFromRuns(
     getSubagentRunsSnapshotForRead(subagentRuns),
     rootSessionKey,
   );

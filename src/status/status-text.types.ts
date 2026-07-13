@@ -12,6 +12,7 @@ export type BuildStatusTextParams = {
   cfg: OpenClawConfig;
   sessionEntry?: SessionEntry;
   sessionKey: string;
+  orchestrationSessionKey?: string;
   parentSessionKey?: string;
   sessionScope?: SessionScope;
   storePath?: string;

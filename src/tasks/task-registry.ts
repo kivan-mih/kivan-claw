@@ -47,6 +47,7 @@ import type {
   TaskStatus,
   TaskTerminalOutcome,
 } from "./task-registry.types.js";
+import { TASK_STAGE_KEY_MAX_LENGTH, TaskStageConflictError } from "./task-stage-admission.js";
 
 const log = createSubsystemLogger("tasks/registry");
 const DEFAULT_TASK_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -389,6 +390,77 @@ function resolveTaskOwnerKey(params: { requesterSessionKey: string; ownerKey?: s
 function normalizeTaskSummary(value: string | null | undefined): string | undefined {
   const normalized = value?.replace(/\s+/g, " ").trim();
   return normalized || undefined;
+}
+
+function normalizeTaskStageKey(value: string | null | undefined): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.length > TASK_STAGE_KEY_MAX_LENGTH) {
+    throw new Error(`Task stageKey must be at most ${TASK_STAGE_KEY_MAX_LENGTH} characters.`);
+  }
+  return normalized;
+}
+
+function findActiveTaskForStage(params: {
+  runtime: TaskRuntime;
+  ownerKey: string;
+  stageKey: string;
+  excludeTaskId?: string;
+}): TaskRecord | undefined {
+  for (const task of tasks.values()) {
+    if (
+      task.taskId !== params.excludeTaskId &&
+      task.runtime === params.runtime &&
+      task.ownerKey === params.ownerKey &&
+      task.stageKey === params.stageKey &&
+      isActiveTaskStatus(task.status)
+    ) {
+      return task;
+    }
+  }
+  return undefined;
+}
+
+function assertTaskStageAvailable(params: {
+  runtime: TaskRuntime;
+  ownerKey: string;
+  stageKey?: string;
+  excludeTaskId?: string;
+  now?: number;
+}): void {
+  if (!params.stageKey) {
+    return;
+  }
+  let incumbent = findActiveTaskForStage({
+    runtime: params.runtime,
+    ownerKey: params.ownerKey,
+    stageKey: params.stageKey,
+    excludeTaskId: params.excludeTaskId,
+  });
+  const now = params.now ?? Date.now();
+  if (
+    incumbent?.status === "queued" &&
+    !incumbent.recoveryAdmissionRunId &&
+    typeof incumbent.stageLeaseExpiresAt === "number" &&
+    incumbent.stageLeaseExpiresAt <= now
+  ) {
+    markTaskLostById({
+      taskId: incumbent.taskId,
+      endedAt: now,
+      error: "Spawn stage reservation expired before dispatch completed.",
+    });
+    incumbent = findActiveTaskForStage({
+      runtime: params.runtime,
+      ownerKey: params.ownerKey,
+      stageKey: params.stageKey,
+      excludeTaskId: params.excludeTaskId,
+    });
+  }
+  if (incumbent) {
+    throw new TaskStageConflictError(cloneTaskRecord(incumbent));
+  }
 }
 
 function normalizeTaskStatus(value: TaskStatus | null | undefined): TaskStatus {
@@ -980,6 +1052,31 @@ function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | nu
     return null;
   }
   const next = normalizeTaskTimestamps({ ...current, ...patch });
+  if ("endedAt" in patch && patch.endedAt === undefined) {
+    delete next.endedAt;
+  }
+  if ("error" in patch && patch.error === undefined) {
+    delete next.error;
+  }
+  if ("cleanupAfter" in patch && patch.cleanupAfter === undefined) {
+    delete next.cleanupAfter;
+  }
+  if ("terminalSummary" in patch && patch.terminalSummary === undefined) {
+    delete next.terminalSummary;
+  }
+  if ("terminalOutcome" in patch && patch.terminalOutcome === undefined) {
+    delete next.terminalOutcome;
+  }
+  if ("recoveryAdmissionRunId" in patch && patch.recoveryAdmissionRunId === undefined) {
+    delete next.recoveryAdmissionRunId;
+  }
+  if ("stageLeaseExpiresAt" in patch && patch.stageLeaseExpiresAt === undefined) {
+    delete next.stageLeaseExpiresAt;
+  }
+  if (next.status !== "queued") {
+    delete next.stageLeaseExpiresAt;
+    delete next.recoveryAdmissionRunId;
+  }
   if (isTerminalTaskStatus(next.status) && typeof next.cleanupAfter !== "number") {
     const terminalAt = next.endedAt ?? next.lastEventAt ?? Date.now();
     next.cleanupAfter = terminalAt + DEFAULT_TASK_RETENTION_MS;
@@ -989,6 +1086,20 @@ function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | nu
     normalizeOptionalString(current.childSessionKey) !==
       normalizeOptionalString(next.childSessionKey);
   const parentFlowIndexChanged = current.parentFlowId?.trim() !== next.parentFlowId?.trim();
+  if (
+    isActiveTaskStatus(next.status) &&
+    (next.status !== current.status ||
+      next.runtime !== current.runtime ||
+      next.ownerKey !== current.ownerKey ||
+      next.stageKey !== current.stageKey)
+  ) {
+    assertTaskStageAvailable({
+      runtime: next.runtime,
+      ownerKey: next.ownerKey,
+      stageKey: next.stageKey,
+      excludeTaskId: taskId,
+    });
+  }
   tasks.set(taskId, next);
   if (patch.runId && patch.runId !== current.runId) {
     rebuildRunIdIndex();
@@ -1003,7 +1114,16 @@ function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | nu
     deleteParentFlowIdIndex(taskId, current);
     addParentFlowIdIndex(taskId, next);
   }
-  persistTaskUpsert(next);
+  try {
+    persistTaskUpsert(next);
+  } catch (error) {
+    tasks.set(taskId, current);
+    rebuildRunIdIndex();
+    rebuildOwnerKeyIndex();
+    rebuildParentFlowIdIndex();
+    rebuildRelatedSessionKeyIndex();
+    throw error;
+  }
   try {
     syncFlowFromTask(next);
   } catch (error) {
@@ -1426,6 +1546,12 @@ function ensureListener() {
     }
     const now = evt.ts || Date.now();
     for (const current of scopedTasks) {
+      // A subagent task tracks the logical orchestration job, not one raw
+      // agent turn. Its owner registry handles yield, retry, recovery, and
+      // descendant drainage before explicitly finalizing the task.
+      if (current.runtime === "subagent") {
+        continue;
+      }
       if (isTerminalTaskStatus(current.status)) {
         continue;
       }
@@ -1479,6 +1605,8 @@ export function createTaskRecord(params: {
   runtime: TaskRuntime;
   taskKind?: string;
   sourceId?: string;
+  stageKey?: string;
+  stageLeaseExpiresAt?: number;
   requesterSessionKey?: string;
   ownerKey?: string;
   scopeKind?: TaskScopeKind;
@@ -1541,6 +1669,13 @@ export function createTaskRecord(params: {
   const now = Date.now();
   const taskId = crypto.randomUUID();
   const status = normalizeTaskStatus(params.status);
+  const stageKey = normalizeTaskStageKey(params.stageKey);
+  assertTaskStageAvailable({
+    runtime: params.runtime,
+    ownerKey,
+    stageKey,
+    now,
+  });
   const deliveryStatus =
     params.deliveryStatus ??
     ensureDeliveryStatus({
@@ -1559,6 +1694,11 @@ export function createTaskRecord(params: {
     runtime: params.runtime,
     taskKind: normalizeOptionalString(params.taskKind),
     sourceId: normalizeOptionalString(params.sourceId),
+    stageKey,
+    stageLeaseExpiresAt:
+      stageKey && status === "queued" && typeof params.stageLeaseExpiresAt === "number"
+        ? params.stageLeaseExpiresAt
+        : undefined,
     requesterSessionKey,
     ownerKey,
     scopeKind,
@@ -1596,7 +1736,31 @@ export function createTaskRecord(params: {
   addOwnerKeyIndex(taskId, record);
   addParentFlowIdIndex(taskId, record);
   addRelatedSessionKeyIndex(taskId, record);
-  persistTaskUpsert(record);
+  try {
+    persistTaskUpsert(record);
+  } catch (error) {
+    deleteOwnerKeyIndex(taskId, record);
+    deleteParentFlowIdIndex(taskId, record);
+    deleteRelatedSessionKeyIndex(taskId, record);
+    tasks.delete(taskId);
+    taskDeliveryStates.delete(taskId);
+    rebuildRunIdIndex();
+    persistTaskDeliveryStateDelete(taskId);
+    const errorMessage = formatErrorMessage(error);
+    if (
+      errorMessage.includes("idx_task_runs_active_stage") ||
+      errorMessage.includes("task_runs.runtime, task_runs.owner_key, task_runs.stage_key")
+    ) {
+      reloadTaskRegistryFromStore();
+      const incumbent = stageKey
+        ? findActiveTaskForStage({ runtime: params.runtime, ownerKey, stageKey })
+        : undefined;
+      if (incumbent) {
+        throw new TaskStageConflictError(cloneTaskRecord(incumbent));
+      }
+    }
+    throw error;
+  }
   try {
     syncFlowFromTask(record);
   } catch (error) {
@@ -1704,6 +1868,154 @@ function updateTaskStateByRunId(params: {
     }
   }
   return updated;
+}
+
+export function rebindActiveTaskRun(params: {
+  taskId?: string;
+  previousRunId: string;
+  nextRunId: string;
+  runtime?: TaskRuntime;
+  sessionKey?: string;
+  lastEventAt?: number;
+  progressSummary?: string | null;
+  recoverTerminal?: boolean;
+}): TaskRecord[] {
+  ensureTaskRegistryReady();
+  const previousRunId = params.previousRunId.trim();
+  const nextRunId = params.nextRunId.trim();
+  if (!previousRunId || !nextRunId) {
+    return [];
+  }
+  const taskId = params.taskId?.trim();
+  const sessionKey = normalizeOptionalString(params.sessionKey);
+  const matches = taskId
+    ? [tasks.get(taskId)].filter((task): task is TaskRecord => Boolean(task))
+    : getTasksByRunScope({
+        runId: previousRunId,
+        runtime: params.runtime,
+        sessionKey,
+      });
+  const rebound: TaskRecord[] = [];
+  for (const current of matches) {
+    const alreadyRebound = current.runId === nextRunId;
+    const recoveryBlocked = params.recoverTerminal === true && current.status === "cancelled";
+    const admissionMismatch =
+      current.recoveryAdmissionRunId !== undefined && current.recoveryAdmissionRunId !== nextRunId;
+    if (
+      (!alreadyRebound && current.runId !== previousRunId) ||
+      recoveryBlocked ||
+      admissionMismatch ||
+      (isTerminalTaskStatus(current.status) && params.recoverTerminal !== true) ||
+      (params.runtime && current.runtime !== params.runtime) ||
+      (sessionKey && normalizeOptionalString(current.childSessionKey) !== sessionKey)
+    ) {
+      continue;
+    }
+    const updated = updateTask(current.taskId, {
+      runId: nextRunId,
+      ...(params.recoverTerminal === true
+        ? {
+            status: "running" as const,
+            deliveryStatus:
+              current.deliveryStatus === "not_applicable" ||
+              current.scopeKind === "system" ||
+              !current.ownerKey.trim()
+                ? ("not_applicable" as const)
+                : ("pending" as const),
+            endedAt: undefined,
+            error: undefined,
+            cleanupAfter: undefined,
+            terminalSummary: undefined,
+            terminalOutcome: undefined,
+          }
+        : {}),
+      lastEventAt: params.lastEventAt ?? Date.now(),
+      ...(params.progressSummary !== undefined
+        ? { progressSummary: normalizeTaskSummary(params.progressSummary) }
+        : {}),
+    });
+    if (updated) {
+      rebound.push(updated);
+    }
+  }
+  return rebound;
+}
+
+export function claimTaskRecoveryAdmission(params: {
+  taskId: string;
+  expectedRunId: string;
+  recoveryRunId: string;
+  progressSummary?: string;
+}): TaskRecord | null {
+  ensureTaskRegistryReady();
+  const current = tasks.get(params.taskId.trim());
+  const expectedRunId = params.expectedRunId.trim();
+  const recoveryRunId = params.recoveryRunId.trim();
+  if (!current || !expectedRunId || !recoveryRunId || current.runId !== expectedRunId) {
+    return null;
+  }
+  if (current.status === "cancelled") {
+    return null;
+  }
+  if (current.recoveryAdmissionRunId) {
+    return current.recoveryAdmissionRunId === recoveryRunId ? cloneTaskRecord(current) : null;
+  }
+  const now = Date.now();
+  if (current.status === "queued") {
+    return null;
+  }
+  return updateTask(current.taskId, {
+    status: "queued",
+    deliveryStatus:
+      current.deliveryStatus === "not_applicable" ||
+      current.scopeKind === "system" ||
+      !current.ownerKey.trim()
+        ? "not_applicable"
+        : "pending",
+    recoveryAdmissionRunId: recoveryRunId,
+    stageLeaseExpiresAt: undefined,
+    endedAt: undefined,
+    error: undefined,
+    cleanupAfter: undefined,
+    terminalSummary: undefined,
+    terminalOutcome: undefined,
+    lastEventAt: now,
+    progressSummary: params.progressSummary ?? "Recovery dispatch admission reserved.",
+  });
+}
+
+export function moveTaskRecoveryAdmission(params: {
+  taskId: string;
+  previousRecoveryRunId: string;
+  nextRecoveryRunId: string;
+}): TaskRecord | null {
+  ensureTaskRegistryReady();
+  const current = tasks.get(params.taskId.trim());
+  if (
+    !current ||
+    current.status !== "queued" ||
+    current.recoveryAdmissionRunId !== params.previousRecoveryRunId.trim()
+  ) {
+    return null;
+  }
+  return updateTask(current.taskId, {
+    recoveryAdmissionRunId: params.nextRecoveryRunId.trim(),
+  });
+}
+
+export function restoreTaskRecoveryAdmission(params: {
+  originalTask: TaskRecord;
+  recoveryRunId: string;
+}): TaskRecord | null {
+  ensureTaskRegistryReady();
+  const current = tasks.get(params.originalTask.taskId);
+  if (!current || current.recoveryAdmissionRunId !== params.recoveryRunId.trim()) {
+    return null;
+  }
+  return updateTask(current.taskId, {
+    ...params.originalTask,
+    recoveryAdmissionRunId: undefined,
+  });
 }
 
 function updateTaskDeliveryByRunId(params: {

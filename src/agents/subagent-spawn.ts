@@ -11,6 +11,17 @@ import { listRegisteredPluginAgentPromptGuidance } from "../plugins/command-regi
 import type { SubagentLifecycleHookRunner } from "../plugins/hooks.js";
 import { isValidAgentId, normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import {
+  createQueuedTaskRun,
+  finalizeTaskRunByRunId,
+  rebindActiveTaskRun,
+  setDetachedTaskDeliveryStatusByRunId,
+  startTaskRunByRunId,
+} from "../tasks/detached-task-runtime.js";
+import {
+  isTaskStageConflictError,
+  TASK_STAGE_KEY_MAX_LENGTH,
+} from "../tasks/task-stage-admission.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { resolveAgentDir } from "./agent-scope-config.js";
 import type { BootstrapContextMode } from "./bootstrap-files.js";
@@ -70,20 +81,24 @@ import {
 } from "./subagent-spawn.runtime.js";
 import {
   SUBAGENT_SPAWN_CONTEXT_MODES,
+  SUBAGENT_SPAWN_CONFLICT_POLICIES,
   SUBAGENT_SPAWN_MODES,
   SUBAGENT_SPAWN_SANDBOX_MODES,
   type SpawnSubagentContextMode,
+  type SpawnSubagentConflictPolicy,
   type SpawnSubagentMode,
   type SpawnSubagentSandboxMode,
 } from "./subagent-spawn.types.js";
 
 export {
   SUBAGENT_SPAWN_CONTEXT_MODES,
+  SUBAGENT_SPAWN_CONFLICT_POLICIES,
   SUBAGENT_SPAWN_MODES,
   SUBAGENT_SPAWN_SANDBOX_MODES,
 } from "./subagent-spawn.types.js";
 export type {
   SpawnSubagentContextMode,
+  SpawnSubagentConflictPolicy,
   SpawnSubagentMode,
   SpawnSubagentSandboxMode,
 } from "./subagent-spawn.types.js";
@@ -120,6 +135,8 @@ const MAX_SUBAGENT_AGENT_GATEWAY_TIMEOUT_MS = 300_000;
 export type SpawnSubagentParams = {
   task: string;
   label?: string;
+  stageKey?: string;
+  onConflict?: SpawnSubagentConflictPolicy;
   agentId?: string;
   model?: string;
   thinking?: string;
@@ -163,6 +180,15 @@ export type SpawnSubagentResult = {
   note?: string;
   modelApplied?: boolean;
   error?: string;
+  code?: "stage_conflict";
+  stageKey?: string;
+  incumbent?: {
+    taskId: string;
+    runId?: string;
+    childSessionKey?: string;
+    status: "queued" | "running";
+    createdAt: number;
+  };
   attachments?: {
     count: number;
     totalBytes: number;
@@ -679,6 +705,25 @@ export async function spawnSubagentDirect(
 ): Promise<SpawnSubagentResult> {
   const task = params.task;
   const label = params.label?.trim() || "";
+  const stageKey = params.stageKey?.trim() || undefined;
+  if (stageKey && stageKey.length > TASK_STAGE_KEY_MAX_LENGTH) {
+    return {
+      status: "error",
+      error: `stageKey must be at most ${TASK_STAGE_KEY_MAX_LENGTH} characters.`,
+    };
+  }
+  if (params.onConflict && !stageKey) {
+    return {
+      status: "error",
+      error: "onConflict requires stageKey.",
+    };
+  }
+  if (params.onConflict && params.onConflict !== "reject") {
+    return {
+      status: "error",
+      error: 'Unsupported onConflict policy. Use "reject".',
+    };
+  }
   const requestedAgentId = params.agentId?.trim();
 
   // Reject malformed agentId before normalizeAgentId can mangle it.
@@ -1103,11 +1148,97 @@ export async function spawnSubagentDirect(
 
   const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
+  let reservedTaskRunId: string = childIdem;
+  let reservedTaskId: string | undefined;
   const deliverInitialChildRunDirectly =
     requestThreadBinding && spawnMode === "session" && hasBoundThreadDeliveryOrigin;
   const shouldAnnounceCompletion = deliverInitialChildRunDirectly
     ? false
     : expectsCompletionMessage;
+  const retireStageReservation = (reason: string) => {
+    if (!reservedTaskId) {
+      return;
+    }
+    const now = Date.now();
+    setDetachedTaskDeliveryStatusByRunId({
+      runId: reservedTaskRunId,
+      runtime: "subagent",
+      sessionKey: childSessionKey,
+      deliveryStatus: "not_applicable",
+    });
+    finalizeTaskRunByRunId({
+      runId: reservedTaskRunId,
+      runtime: "subagent",
+      sessionKey: childSessionKey,
+      status: "cancelled",
+      endedAt: now,
+      lastEventAt: now,
+      error: reason,
+      terminalSummary: "Subagent spawn did not start.",
+    });
+  };
+  const quarantineStageReservation = (reason: string) => {
+    if (!reservedTaskId) {
+      return;
+    }
+    startTaskRunByRunId({
+      runId: reservedTaskRunId,
+      runtime: "subagent",
+      sessionKey: childSessionKey,
+      startedAt: Date.now(),
+      lastEventAt: Date.now(),
+      progressSummary: `Spawn cleanup is uncertain: ${reason}`,
+    });
+  };
+  if (stageKey) {
+    try {
+      const gatewayTimeoutMs = resolveSubagentAgentGatewayTimeoutMs(runTimeoutSeconds);
+      const reservation = createQueuedTaskRun({
+        runtime: "subagent",
+        sourceId: childIdem,
+        stageKey,
+        stageLeaseExpiresAt: Date.now() + gatewayTimeoutMs + 30_000,
+        ownerKey: requesterInternalKey,
+        scopeKind: "session",
+        requesterOrigin,
+        childSessionKey,
+        runId: childIdem,
+        label: label || undefined,
+        task,
+        deliveryStatus: shouldAnnounceCompletion ? "pending" : "not_applicable",
+      });
+      reservedTaskId = reservation.taskId;
+    } catch (error) {
+      await rollbackPreparedContextEngine(contextEnginePreparation);
+      await cleanupFailedSpawnBeforeAgentStart({
+        childSessionKey,
+        attachmentAbsDir,
+        emitLifecycleHooks: threadBindingReady,
+        deleteTranscript: true,
+      });
+      if (isTaskStageConflictError(error)) {
+        const incumbent = error.incumbent;
+        return {
+          status: "error",
+          code: "stage_conflict",
+          stageKey,
+          error: `Stage "${stageKey}" already has an active subagent task.`,
+          incumbent: {
+            taskId: incumbent.taskId,
+            runId: incumbent.runId,
+            childSessionKey: incumbent.childSessionKey,
+            status: incumbent.status === "queued" ? "queued" : "running",
+            createdAt: incumbent.createdAt,
+          },
+        };
+      }
+      return {
+        status: "error",
+        stageKey,
+        error: `Failed to reserve subagent stage: ${summarizeError(error)}`,
+      };
+    }
+  }
   try {
     const {
       spawnedBy: _spawnedBy,
@@ -1147,6 +1278,34 @@ export async function spawnSubagentDirect(
     const runId = readGatewayRunId(response);
     if (runId) {
       childRunId = runId;
+    }
+    if (reservedTaskId && childRunId !== childIdem) {
+      const rebound = rebindActiveTaskRun({
+        taskId: reservedTaskId,
+        previousRunId: childIdem,
+        nextRunId: childRunId,
+        runtime: "subagent",
+        sessionKey: childSessionKey,
+        lastEventAt: Date.now(),
+        progressSummary: "Spawn accepted; starting execution.",
+      })[0];
+      if (!rebound || rebound.taskId !== reservedTaskId) {
+        throw new Error("Failed to bind the reserved stage task to the accepted subagent run.");
+      }
+      reservedTaskRunId = childRunId;
+    }
+    if (reservedTaskId) {
+      const started = startTaskRunByRunId({
+        runId: reservedTaskRunId,
+        runtime: "subagent",
+        sessionKey: childSessionKey,
+        startedAt: Date.now(),
+        lastEventAt: Date.now(),
+        progressSummary: "Subagent execution started.",
+      })[0];
+      if (!started || started.taskId !== reservedTaskId) {
+        throw new Error("Failed to promote the reserved stage task after agent dispatch.");
+      }
     }
   } catch (err) {
     await rollbackPreparedContextEngine(contextEnginePreparation);
@@ -1189,8 +1348,9 @@ export async function spawnSubagentDirect(
     }
     // Always delete the provisional child session after a failed spawn attempt.
     // If we already emitted subagent_ended above, suppress a duplicate lifecycle hook.
+    let provisionalSessionDeleted = false;
     try {
-      await callSubagentGateway({
+      const deletion = (await callSubagentGateway({
         method: "sessions.delete",
         params: {
           key: childSessionKey,
@@ -1198,9 +1358,19 @@ export async function spawnSubagentDirect(
           emitLifecycleHooks,
         },
         timeoutMs: SUBAGENT_CONTROL_GATEWAY_TIMEOUT_MS,
-      });
+      })) as { deleted?: boolean } | undefined;
+      provisionalSessionDeleted = deletion?.deleted === true;
     } catch {
       // Best-effort only.
+    }
+    if (provisionalSessionDeleted) {
+      try {
+        retireStageReservation(summarizeError(err));
+      } catch {
+        // Best-effort cleanup only.
+      }
+    } else {
+      quarantineStageReservation(summarizeError(err));
     }
     const messageText = summarizeError(err);
     return {
@@ -1214,6 +1384,8 @@ export async function spawnSubagentDirect(
   try {
     registerSubagentRun({
       runId: childRunId,
+      taskId: reservedTaskId,
+      stageKey,
       childSessionKey,
       controllerSessionKey: requesterInternalKey,
       requesterSessionKey: requesterInternalKey,
@@ -1241,8 +1413,9 @@ export async function spawnSubagentDirect(
         // Best-effort cleanup only.
       }
     }
+    let provisionalSessionDeleted = false;
     try {
-      await callSubagentGateway({
+      const deletion = (await callSubagentGateway({
         method: "sessions.delete",
         params: {
           key: childSessionKey,
@@ -1250,9 +1423,19 @@ export async function spawnSubagentDirect(
           emitLifecycleHooks: threadBindingReady,
         },
         timeoutMs: SUBAGENT_CONTROL_GATEWAY_TIMEOUT_MS,
-      });
+      })) as { deleted?: boolean } | undefined;
+      provisionalSessionDeleted = deletion?.deleted === true;
     } catch {
       // Best-effort cleanup only.
+    }
+    if (provisionalSessionDeleted) {
+      try {
+        retireStageReservation(summarizeError(err));
+      } catch {
+        // Best-effort cleanup only.
+      }
+    } else {
+      quarantineStageReservation(summarizeError(err));
     }
     return {
       status: "error",
@@ -1320,6 +1503,7 @@ export async function spawnSubagentDirect(
     status: "accepted",
     childSessionKey,
     runId: childRunId,
+    stageKey,
     mode: spawnMode,
     note: preparedSpawnContext.forkFallbackNote
       ? `${acceptedNote} ${preparedSpawnContext.forkFallbackNote}`

@@ -25,6 +25,8 @@ Not every agent run creates a task. Heartbeat turns and normal interactive chat 
 - Tasks are **records**, not schedulers — cron and heartbeat decide _when_ work runs, tasks track _what happened_.
 - ACP, subagents, all cron jobs, and CLI operations create tasks. Heartbeat turns do not.
 - Each task moves through `queued → running → terminal` (succeeded, failed, timed_out, cancelled, or lost).
+- A subagent task represents the logical orchestration job, so it stays `running` across `sessions_yield`, recoverable transport interruptions, replacement transport run IDs, and descendant drainage.
+- Native `sessions_spawn` calls can reserve a `stageKey`; the task store atomically allows only one queued or running task for that stage and requester, and releases the stage when the task becomes terminal.
 - Cron tasks stay live while the cron runtime still owns the job; if the
   in-memory runtime state is gone, task maintenance first checks durable cron
   run history before marking a task lost.
@@ -133,16 +135,16 @@ stateDiagram-v2
 | Status      | What it means                                                              |
 | ----------- | -------------------------------------------------------------------------- |
 | `queued`    | Created, waiting for the agent to start                                    |
-| `running`   | Agent turn is actively executing                                           |
+| `running`   | Detached work is nonterminal                                               |
 | `succeeded` | Completed successfully                                                     |
 | `failed`    | Completed with an error                                                    |
 | `timed_out` | Exceeded the configured timeout                                            |
 | `cancelled` | Stopped by the operator via `openclaw tasks cancel`                        |
 | `lost`      | The runtime lost authoritative backing state after a 5-minute grace period |
 
-Transitions happen automatically — when the associated agent run ends, the task status updates to match.
+Transitions happen automatically. Most detached tasks follow the associated agent run. Subagent tasks instead follow the authoritative subagent workflow: an ended/yielded turn with pending descendants remains `running`, and a recoverable transport interruption does not terminalize the logical task. If recovery replaces the transport run ID, OpenClaw persists a remap intent, rebinds the same task record, reconciles the child session to `running`, and then retires the old run; startup repair completes any interrupted remap.
 
-Agent run completion is authoritative for active task records. A successful detached run finalizes as `succeeded`, ordinary run errors finalize as `failed`, and timeout or abort outcomes finalize as `timed_out`. If an operator already cancelled the task, or the runtime already recorded a stronger terminal state such as `failed`, `timed_out`, or `lost`, a later success signal does not downgrade that terminal status.
+Runtime-owner completion is authoritative for active task records. A successful detached run finalizes as `succeeded`, ordinary run errors finalize as `failed`, and timeout or abort outcomes finalize as `timed_out`. For subagents, the owner waits for recovery and pending descendants to settle before applying that terminal outcome. If an operator already cancelled the task, or the runtime already recorded a stronger terminal state such as `failed`, `timed_out`, or `lost`, a later success signal does not downgrade that terminal status.
 
 `lost` is runtime-aware:
 
@@ -359,7 +361,7 @@ A sweeper runs every **60 seconds** and handles four things:
     A task may reference a `childSessionKey` (where work runs) and a `requesterSessionKey` (who started it). Sessions are conversation context; tasks are activity tracking on top of that.
   </Accordion>
   <Accordion title="Tasks and agent runs">
-    A task's `runId` links to the agent run doing the work. Agent lifecycle events (start, end, error) automatically update the task status — you do not need to manage the lifecycle manually.
+    A task's `runId` links to the agent run doing the work. Agent lifecycle events (start, end, error) automatically update most task statuses. Subagent lifecycle is owned by the subagent registry because one logical job can span yielded turns, recovery attempts, and descendant work; a replacement transport run updates the task's `runId` without changing its task identity.
   </Accordion>
 </AccordionGroup>
 

@@ -124,8 +124,15 @@ const { subagentRegistryMock } = vi.hoisted(() => ({
     replaceSubagentRunAfterSteer: vi.fn(
       (_params: { previousRunId: string; nextRunId: string }) => true,
     ),
+    hasPendingSubagentRecoveryRemap: vi.fn(
+      (_params: { previousRunId: string; nextRunId: string }) => false,
+    ),
     resolveRequesterForChildSession: vi.fn((_sessionKey: string): RequesterResolution => null),
   },
+}));
+const wakeCleanupMocks = vi.hoisted(() => ({
+  abortEmbeddedPiRun: vi.fn(() => false),
+  clearSessionQueues: vi.fn(() => ({ followupCleared: 0, laneCleared: 0, keys: [] })),
 }));
 const subagentDeliveryTargetHookMock = vi.fn(
   async (_event?: unknown, _ctx?: unknown): Promise<SubagentDeliveryTargetResult | undefined> =>
@@ -250,6 +257,7 @@ function loadSessionStoreFixture(): Record<string, SessionEntry> {
 
 vi.mock("./subagent-registry.js", () => subagentRegistryMock);
 vi.mock("./subagent-registry-runtime.js", () => subagentRegistryMock);
+vi.mock("./subagent-control.runtime.js", () => wakeCleanupMocks);
 
 describe("subagent announce formatting", () => {
   let previousFastTestEnv: string | undefined;
@@ -396,7 +404,14 @@ describe("subagent announce formatting", () => {
       .mockReturnValue(undefined);
     subagentRegistryMock.listSubagentRunsForRequester.mockClear().mockReturnValue([]);
     subagentRegistryMock.replaceSubagentRunAfterSteer.mockClear().mockReturnValue(true);
+    subagentRegistryMock.hasPendingSubagentRecoveryRemap.mockClear().mockReturnValue(false);
     subagentRegistryMock.resolveRequesterForChildSession.mockClear().mockReturnValue(null);
+    wakeCleanupMocks.abortEmbeddedPiRun.mockClear().mockReturnValue(false);
+    wakeCleanupMocks.clearSessionQueues.mockClear().mockReturnValue({
+      followupCleared: 0,
+      laneCleared: 0,
+      keys: [],
+    });
     hasSubagentDeliveryTargetHook = false;
     hookHasHooksMock.mockClear();
     hookRunSubagentDeliveryTargetMock.mockClear();
@@ -2626,6 +2641,51 @@ describe("subagent announce formatting", () => {
     };
 
     subagentRegistryMock.countPendingDescendantRuns.mockReturnValue(0);
+    subagentRegistryMock.getLatestSubagentRunByChildSessionKey.mockImplementation((sessionKey) => {
+      if (sessionKey === "agent:main:subagent:parent") {
+        return {
+          runId: "run-parent-phase-1",
+          childSessionKey: sessionKey,
+          requesterSessionKey: "agent:main:main",
+          requesterDisplayKey: "main",
+          task: "parent task",
+          cleanup: "keep",
+          createdAt: 1,
+          endedAt: 2,
+        };
+      }
+      if (sessionKey.endsWith(":subagent:a")) {
+        return {
+          runId: "run-child-a",
+          childSessionKey: sessionKey,
+          requesterSessionKey: "agent:main:subagent:parent",
+          requesterDisplayKey: "parent",
+          task: "child task a",
+          cleanup: "keep",
+          createdAt: 10,
+          endedAt: 20,
+          cleanupCompletedAt: 21,
+          frozenResultText: "result from child a",
+          outcome: { status: "ok" },
+        };
+      }
+      if (sessionKey.endsWith(":subagent:b")) {
+        return {
+          runId: "run-child-b",
+          childSessionKey: sessionKey,
+          requesterSessionKey: "agent:main:subagent:parent",
+          requesterDisplayKey: "parent",
+          task: "child task b",
+          cleanup: "keep",
+          createdAt: 11,
+          endedAt: 21,
+          cleanupCompletedAt: 22,
+          frozenResultText: "result from child b",
+          outcome: { status: "ok" },
+        };
+      }
+      return undefined;
+    });
     subagentRegistryMock.listSubagentRunsForRequester.mockImplementation(
       (sessionKey: string, scope?: { requesterRunId?: string }) => {
         if (sessionKey !== "agent:main:subagent:parent") {
@@ -2693,6 +2753,46 @@ describe("subagent announce formatting", () => {
     expect(subagentRegistryMock.replaceSubagentRunAfterSteer).toHaveBeenCalledWith({
       previousRunId: "run-parent-phase-1",
       nextRunId: "run-parent-phase-2",
+      preserveFrozenResultFallback: true,
+    });
+  });
+
+  it("stops an accepted descendant wake when durable remap is rejected", async () => {
+    sessionStore = {
+      "agent:main:subagent:parent": {
+        sessionId: "session-parent",
+      },
+    };
+    subagentRegistryMock.getLatestSubagentRunByChildSessionKey.mockReturnValue({
+      runId: "run-parent-before-rejected-wake",
+      childSessionKey: "agent:main:subagent:parent",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "parent task",
+      cleanup: "keep",
+      createdAt: 1,
+      endedAt: 2,
+    });
+    subagentRegistryMock.replaceSubagentRunAfterSteer.mockReturnValue(false);
+    agentSpy.mockResolvedValueOnce(visibleAgentResponse("run-rejected-wake"));
+
+    const woke = await subagentAnnounceTesting.wakeSubagentRunAfterDescendants({
+      runId: "run-parent-before-rejected-wake",
+      childSessionKey: "agent:main:subagent:parent",
+      taskLabel: "parent task",
+      findings: "children settled",
+      announceId: "rejected-wake",
+    });
+
+    expect(woke).toBe(false);
+    expect(wakeCleanupMocks.abortEmbeddedPiRun).toHaveBeenCalledWith("session-parent");
+    expect(wakeCleanupMocks.clearSessionQueues).toHaveBeenCalledWith([
+      "agent:main:subagent:parent",
+      "session-parent",
+    ]);
+    expect(subagentRegistryMock.replaceSubagentRunAfterSteer).toHaveBeenCalledWith({
+      previousRunId: "run-parent-before-rejected-wake",
+      nextRunId: "run-rejected-wake",
       preserveFrozenResultFallback: true,
     });
   });

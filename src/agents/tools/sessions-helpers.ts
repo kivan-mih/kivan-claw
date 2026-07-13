@@ -22,6 +22,7 @@ export {
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
+import type { SubagentWorkflowState } from "../subagent-run-liveness.js";
 
 export type SessionKind = "main" | "group" | "cron" | "hook" | "node" | "other";
 
@@ -57,6 +58,11 @@ export type SessionListRow = {
   totalTokens?: number | null;
   estimatedCostUsd?: number;
   status?: SessionRunStatus;
+  subagentRunState?: "active" | "interrupted" | "historical";
+  hasActiveSubagentRun?: boolean;
+  workflowState?: SubagentWorkflowState;
+  workflowTerminal?: boolean;
+  pendingDescendants?: number;
   startedAt?: number;
   endedAt?: number;
   runtimeMs?: number;

@@ -306,7 +306,11 @@ export async function buildStatusText(params: BuildStatusTextParams): Promise<st
   let taskLine: string | undefined;
   if (sessionKey) {
     const { mainKey, alias } = resolveMainSessionAlias(cfg);
-    const requesterKey = resolveInternalSessionKey({ key: sessionKey, alias, mainKey });
+    const requesterKey = resolveInternalSessionKey({
+      key: params.orchestrationSessionKey ?? sessionKey,
+      alias,
+      mainKey,
+    });
     taskLine = params.skipDefaultTaskLookup
       ? params.taskLineOverride
       : (params.taskLineOverride ?? formatSessionTaskLine(requesterKey));

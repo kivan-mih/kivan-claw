@@ -3,7 +3,15 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { callGateway } from "../gateway/call.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
-import { createRunningTaskRun } from "../tasks/detached-task-runtime.js";
+import {
+  createRunningTaskRun,
+  finalizeTaskRunByRunId,
+  forceFinalizeTaskRunById,
+  rebindActiveTaskRun,
+  recordTaskRunProgressByRunId,
+  setDetachedTaskDeliveryStatusByRunId,
+  startTaskRunByRunId,
+} from "../tasks/detached-task-runtime.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { isRecoverableAgentWaitError, waitForAgentRun } from "./run-wait.js";
@@ -28,6 +36,7 @@ import {
   safeRemoveAttachmentsDir,
 } from "./subagent-registry-helpers.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { resolveSubagentWorkflowProjection } from "./subagent-run-liveness.js";
 
 const log = createSubsystemLogger("agents/subagent-registry");
 const RECOVERABLE_WAIT_RETRY_DELAY_MS = process.env.OPENCLAW_TEST_FAST === "1" ? 25 : 5_000;
@@ -85,6 +94,8 @@ export function markSubagentRunPausedAfterYield(params: {
 
 export type RegisterSubagentRunParams = {
   runId: string;
+  taskId?: string;
+  stageKey?: string;
   childSessionKey: string;
   controllerSessionKey?: string;
   requesterSessionKey: string;
@@ -108,7 +119,7 @@ export function createSubagentRunManager(params: {
   runs: Map<string, SubagentRunRecord>;
   resumedRuns: Set<string>;
   endedHookInFlightRunIds: Set<string>;
-  persist(): void;
+  persist(): boolean | void;
   callGateway: typeof callGateway;
   getRuntimeConfig: typeof getRuntimeConfig;
   ensureRuntimePluginsLoaded:
@@ -122,7 +133,8 @@ export function createSubagentRunManager(params: {
   startSweeper(): void;
   stopSweeper(): void;
   resumeSubagentRun(runId: string): void;
-  clearPendingLifecycleError(runId: string): void;
+  clearPendingLifecycleState(runId: string): void;
+  countPendingDescendantRuns(rootSessionKey: string): number;
   resolveSubagentWaitTimeoutMs(cfg: OpenClawConfig, runTimeoutSeconds?: number): number;
   scheduleOrphanRecovery(args?: { delayMs?: number; maxRetries?: number }): void;
   notifyContextEngineSubagentEnded(args: {
@@ -152,6 +164,78 @@ export function createSubagentRunManager(params: {
   isEmbeddedPiRunLoopActive(sessionKey: string | undefined): boolean;
   waitForEmbeddedPiRunLoopEnd(sessionKey: string | undefined, timeoutMs?: number): Promise<boolean>;
 }) {
+  const createLogicalSubagentTask = (entry: SubagentRunRecord, startedAt: number) => {
+    if (entry.taskId) {
+      const started = startTaskRunByRunId({
+        runId: entry.runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
+        startedAt,
+        lastEventAt: startedAt,
+        progressSummary: "Subagent execution started.",
+      })[0];
+      if (!started || started.taskId !== entry.taskId) {
+        throw new Error(`Reserved background task was not found for subagent run ${entry.runId}.`);
+      }
+      return started;
+    }
+    return createRunningTaskRun({
+      runtime: "subagent",
+      sourceId: entry.logicalRunId ?? entry.runId,
+      stageKey: entry.stageKey,
+      ownerKey: entry.requesterSessionKey,
+      scopeKind: "session",
+      requesterOrigin: entry.requesterOrigin,
+      childSessionKey: entry.childSessionKey,
+      runId: entry.runId,
+      label: entry.label,
+      task: entry.task,
+      deliveryStatus: entry.expectsCompletionMessage === false ? "not_applicable" : "pending",
+      startedAt,
+      lastEventAt: startedAt,
+    });
+  };
+
+  const markRecovering = async (entry: SubagentRunRecord, error?: string) => {
+    const now = Date.now();
+    let mutated = false;
+    if (entry.recoveryState !== "recovering") {
+      entry.recoveryState = "recovering";
+      mutated = true;
+    }
+    if (typeof entry.recoveryStartedAt !== "number") {
+      entry.recoveryStartedAt = now;
+      mutated = true;
+    }
+    if (mutated) {
+      params.persist();
+    }
+    try {
+      await persistSubagentSessionTiming(entry);
+    } catch (sessionError) {
+      log.warn("Failed to reconcile recovering subagent session state", {
+        runId: entry.runId,
+        childSessionKey: entry.childSessionKey,
+        error: sessionError,
+      });
+    }
+    try {
+      recordTaskRunProgressByRunId({
+        runId: entry.runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
+        lastEventAt: now,
+        progressSummary: "Recovering after a transport interruption.",
+        eventSummary: error,
+      });
+    } catch (taskError) {
+      log.warn("Failed to mark subagent task as recovering", {
+        runId: entry.runId,
+        error: taskError,
+      });
+    }
+  };
+
   const waitForSubagentCompletion = async (
     runId: string,
     waitTimeoutMs: number,
@@ -188,6 +272,7 @@ export function createSubagentRunManager(params: {
           childSessionKey: expectedEntry?.childSessionKey ?? entry?.childSessionKey,
           error: wait.error,
         });
+        await markRecovering(entry, wait.error);
         params.scheduleOrphanRecovery({ delayMs: 1_000 });
         const scheduledEntry = entry;
         setTimeout(() => {
@@ -319,7 +404,125 @@ export function createSubagentRunManager(params: {
     return true;
   };
 
-  const replaceSubagentRunAfterSteer = (replaceParams: {
+  const persistRecoveryState = () => {
+    if (params.persist() === false) {
+      throw new Error("Failed to persist subagent recovery remap state.");
+    }
+  };
+
+  const completeRecoveryRemap = async (next: SubagentRunRecord): Promise<void> => {
+    const recoveryRemap = next.recoveryRemap;
+    if (!recoveryRemap) {
+      return;
+    }
+    const { previousRunId, nextRunId } = recoveryRemap;
+    if (next.runId !== nextRunId) {
+      throw new Error("Recovery remap target does not match the persisted run record.");
+    }
+    const previous = params.runs.get(previousRunId);
+    if (previous) {
+      const previousLogicalRunId = previous.logicalRunId ?? previous.runId;
+      const nextLogicalRunId = next.logicalRunId ?? next.runId;
+      if (
+        previousLogicalRunId !== nextLogicalRunId ||
+        (previous.taskId && next.taskId && previous.taskId !== next.taskId)
+      ) {
+        throw new Error("Recovery remap identity does not match its source run.");
+      }
+    }
+    const now = Date.now();
+
+    const createReplacementTask = () => {
+      try {
+        setDetachedTaskDeliveryStatusByRunId({
+          runId: previousRunId,
+          runtime: "subagent",
+          sessionKey: next.childSessionKey,
+          deliveryStatus: "not_applicable",
+        });
+        finalizeTaskRunByRunId({
+          runId: previousRunId,
+          runtime: "subagent",
+          sessionKey: next.childSessionKey,
+          status: "cancelled",
+          endedAt: now,
+          lastEventAt: now,
+          terminalSummary: "Superseded by a recovered attempt.",
+        });
+      } catch (error) {
+        log.warn("Failed to retire superseded subagent background task", {
+          previousRunId,
+          nextRunId,
+          error,
+        });
+      }
+      next.taskId = createLogicalSubagentTask({ ...next, taskId: undefined }, now).taskId;
+    };
+
+    if (recoveryRemap.phase === "prepared") {
+      try {
+        const rebound = rebindActiveTaskRun({
+          taskId: next.taskId,
+          previousRunId,
+          nextRunId,
+          runtime: "subagent",
+          sessionKey: next.childSessionKey,
+          lastEventAt: now,
+          progressSummary: "Recovered; resumed execution.",
+          recoverTerminal: true,
+        });
+        const reboundTask = rebound[0];
+        if (reboundTask) {
+          next.taskId = reboundTask.taskId;
+        } else if (next.taskId) {
+          throw new Error(
+            `Background task ${next.taskId} could not be rebound for recovered subagent run.`,
+          );
+        } else {
+          createReplacementTask();
+        }
+      } catch (error) {
+        log.warn("Failed to rebind background task for recovered subagent run", {
+          previousRunId,
+          nextRunId,
+          error,
+        });
+        throw error;
+      }
+      recoveryRemap.phase = "task_rebound";
+      persistRecoveryState();
+    }
+
+    if (recoveryRemap.phase === "task_rebound") {
+      await persistSubagentSessionTiming(next);
+      recoveryRemap.phase = "session_reconciled";
+      persistRecoveryState();
+    }
+
+    if (previousRunId !== nextRunId) {
+      params.clearPendingLifecycleState(previousRunId);
+      params.runs.delete(previousRunId);
+      params.resumedRuns.delete(previousRunId);
+    }
+    next.recoveryRemap = undefined;
+    try {
+      persistRecoveryState();
+    } catch (error) {
+      next.recoveryRemap = recoveryRemap;
+      throw error;
+    }
+  };
+
+  const activateRecoveredRun = (next: SubagentRunRecord) => {
+    const cfg = params.getRuntimeConfig();
+    const waitTimeoutMs = params.resolveSubagentWaitTimeoutMs(cfg, next.runTimeoutSeconds ?? 0);
+    params.ensureListener();
+    params.startSweeper();
+    params.resumedRuns.add(next.runId);
+    void waitForSubagentCompletion(next.runId, waitTimeoutMs, next);
+  };
+
+  const replaceSubagentRunAfterSteer = async (replaceParams: {
     previousRunId: string;
     nextRunId: string;
     fallback?: SubagentRunRecord;
@@ -332,20 +535,45 @@ export function createSubagentRunManager(params: {
       return false;
     }
 
+    const existingNext = nextRunId === previousRunId ? undefined : params.runs.get(nextRunId);
+    if (existingNext) {
+      if (
+        existingNext.recoveryRemap?.previousRunId === previousRunId &&
+        existingNext.recoveryRemap.nextRunId === nextRunId
+      ) {
+        try {
+          await completeRecoveryRemap(existingNext);
+          activateRecoveredRun(existingNext);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      const previousForIdentity = params.runs.get(previousRunId) ?? replaceParams.fallback;
+      if (
+        previousForIdentity &&
+        (existingNext.logicalRunId ?? existingNext.runId) ===
+          (previousForIdentity.logicalRunId ?? previousForIdentity.runId) &&
+        (!previousForIdentity.taskId || existingNext.taskId === previousForIdentity.taskId)
+      ) {
+        return true;
+      }
+      return false;
+    }
+
     const previous = params.runs.get(previousRunId);
     const source = previous ?? replaceParams.fallback;
     if (!source) {
       return false;
     }
-
-    if (previousRunId !== nextRunId) {
-      params.clearPendingLifecycleError(previousRunId);
-      if (shouldDeleteAttachments(source)) {
-        void safeRemoveAttachmentsDir(source);
-      }
-      params.runs.delete(previousRunId);
-      params.resumedRuns.delete(previousRunId);
+    if (
+      source.endedReason === SUBAGENT_ENDED_REASON_KILLED ||
+      source.suppressAnnounceReason === "killed"
+    ) {
+      return false;
     }
+    params.clearPendingLifecycleState(previousRunId);
+    params.clearPendingLifecycleState(nextRunId);
 
     const now = Date.now();
     const cfg = params.getRuntimeConfig();
@@ -358,7 +586,6 @@ export function createSubagentRunManager(params: {
           ? now + archiveAfterMs
           : undefined;
     const runTimeoutSeconds = replaceParams.runTimeoutSeconds ?? source.runTimeoutSeconds ?? 0;
-    const waitTimeoutMs = params.resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
     const preserveFrozenResultFallback = replaceParams.preserveFrozenResultFallback === true;
     const sessionStartedAt = getSubagentSessionStartedAt(source) ?? now;
     const accumulatedRuntimeMs =
@@ -370,6 +597,7 @@ export function createSubagentRunManager(params: {
     const next: SubagentRunRecord = {
       ...source,
       runId: nextRunId,
+      logicalRunId: source.logicalRunId ?? source.runId,
       createdAt: now,
       startedAt: now,
       sessionStartedAt,
@@ -377,6 +605,14 @@ export function createSubagentRunManager(params: {
       endedAt: undefined,
       endedReason: undefined,
       pauseReason: undefined,
+      recoveryState: undefined,
+      recoveryStartedAt: undefined,
+      recoveryRemap: {
+        previousRunId,
+        nextRunId,
+        phase: "prepared",
+        preparedAt: now,
+      },
       endedHookEmittedAt: undefined,
       wakeOnDescendantSettle: undefined,
       outcome: undefined,
@@ -396,14 +632,45 @@ export function createSubagentRunManager(params: {
       archiveAtMs,
       runTimeoutSeconds,
     };
-
     params.runs.set(nextRunId, next);
-    params.ensureListener();
-    params.persist();
-    // Always start sweeper — session-mode runs (no archiveAtMs) also need TTL cleanup.
-    params.startSweeper();
-    void waitForSubagentCompletion(nextRunId, waitTimeoutMs, next);
-    return true;
+    try {
+      persistRecoveryState();
+      await completeRecoveryRemap(next);
+      if (previousRunId !== nextRunId && shouldDeleteAttachments(source)) {
+        void safeRemoveAttachmentsDir(source);
+      }
+      activateRecoveredRun(next);
+      return true;
+    } catch (error) {
+      log.warn("Subagent recovery remap remains pending for startup repair", {
+        previousRunId,
+        nextRunId,
+        phase: next.recoveryRemap?.phase,
+        error,
+      });
+      return false;
+    }
+  };
+
+  const repairInterruptedRecoveryRemaps = async (): Promise<number> => {
+    let repaired = 0;
+    for (const entry of [...params.runs.values()]) {
+      if (!entry.recoveryRemap) {
+        continue;
+      }
+      try {
+        await completeRecoveryRemap(entry);
+        activateRecoveredRun(entry);
+        repaired += 1;
+      } catch (error) {
+        log.warn("Failed to repair interrupted subagent recovery remap", {
+          runId: entry.runId,
+          phase: entry.recoveryRemap?.phase,
+          error,
+        });
+      }
+    }
+    return repaired;
   };
 
   const registerSubagentRun = (registerParams: RegisterSubagentRunParams) => {
@@ -429,6 +696,9 @@ export function createSubagentRunManager(params: {
     const requesterOrigin = normalizeDeliveryContext(registerParams.requesterOrigin);
     const entry: SubagentRunRecord = {
       runId,
+      logicalRunId: runId,
+      taskId: registerParams.taskId,
+      stageKey: registerParams.stageKey,
       childSessionKey,
       controllerSessionKey,
       requesterSessionKey,
@@ -457,26 +727,16 @@ export function createSubagentRunManager(params: {
     };
     params.runs.set(runId, entry);
     try {
-      createRunningTaskRun({
-        runtime: "subagent",
-        sourceId: runId,
-        ownerKey: requesterSessionKey,
-        scopeKind: "session",
-        requesterOrigin,
-        childSessionKey,
-        runId,
-        label: registerParams.label,
-        task: registerParams.task,
-        deliveryStatus:
-          registerParams.expectsCompletionMessage === false ? "not_applicable" : "pending",
-        startedAt: now,
-        lastEventAt: now,
-      });
+      entry.taskId = createLogicalSubagentTask(entry, now).taskId;
     } catch (error) {
       log.warn("Failed to create background task for subagent run", {
         runId: registerParams.runId,
         error,
       });
+      if (registerParams.taskId) {
+        params.runs.delete(runId);
+        throw error;
+      }
     }
     params.ensureListener();
     params.persist();
@@ -488,7 +748,7 @@ export function createSubagentRunManager(params: {
   };
 
   const releaseSubagentRun = (runId: string) => {
-    params.clearPendingLifecycleError(runId);
+    params.clearPendingLifecycleState(runId);
     const entry = params.runs.get(runId);
     if (entry) {
       if (shouldDeleteAttachments(entry)) {
@@ -516,10 +776,13 @@ export function createSubagentRunManager(params: {
     reason?: string;
   }): number => {
     const runIds = new Set<string>();
-    if (typeof markParams.runId === "string" && markParams.runId.trim()) {
-      runIds.add(markParams.runId.trim());
-    }
-    if (typeof markParams.childSessionKey === "string" && markParams.childSessionKey.trim()) {
+    const exactRunId = typeof markParams.runId === "string" ? markParams.runId.trim() : "";
+    if (exactRunId) {
+      runIds.add(exactRunId);
+    } else if (
+      typeof markParams.childSessionKey === "string" &&
+      markParams.childSessionKey.trim()
+    ) {
       for (const [runId, entry] of params.runs.entries()) {
         if (entry.childSessionKey === markParams.childSessionKey.trim()) {
           runIds.add(runId);
@@ -535,12 +798,17 @@ export function createSubagentRunManager(params: {
     let updated = 0;
     const entriesByChildSessionKey = new Map<string, SubagentRunRecord>();
     for (const runId of runIds) {
-      params.clearPendingLifecycleError(runId);
+      params.clearPendingLifecycleState(runId);
       const entry = params.runs.get(runId);
       if (!entry) {
         continue;
       }
-      if (typeof entry.endedAt === "number") {
+      if (
+        resolveSubagentWorkflowProjection(
+          entry,
+          params.countPendingDescendantRuns(entry.childSessionKey),
+        ).terminal
+      ) {
         continue;
       }
       entry.endedAt = now;
@@ -552,9 +820,74 @@ export function createSubagentRunManager(params: {
         },
       );
       entry.endedReason = SUBAGENT_ENDED_REASON_KILLED;
+      entry.recoveryState = undefined;
+      entry.recoveryStartedAt = undefined;
       entry.cleanupHandled = true;
       entry.cleanupCompletedAt = now;
       entry.suppressAnnounceReason = "killed";
+      const taskRunIds = new Set([
+        entry.runId,
+        entry.recoveryRemap?.previousRunId,
+        entry.recoveryRemap?.nextRunId,
+      ]);
+      // An operator kill supersedes any crash-repair intent. Clearing the
+      // remap prevents restart repair from reviving explicitly cancelled work.
+      entry.recoveryRemap = undefined;
+      // A killed subagent no longer emits a reliable raw agent lifecycle event.
+      // The subagent registry owns the logical task, so retire it here before
+      // cleanup can make the run disappear from the owner registry.
+      for (const taskRunId of taskRunIds) {
+        if (!taskRunId) {
+          continue;
+        }
+        try {
+          setDetachedTaskDeliveryStatusByRunId({
+            runId: taskRunId,
+            runtime: "subagent",
+            sessionKey: entry.childSessionKey,
+            deliveryStatus: "not_applicable",
+          });
+        } catch (error) {
+          log.warn("Failed to suppress delivery for terminated subagent task", {
+            runId: taskRunId,
+            error,
+          });
+        }
+      }
+      try {
+        if (entry.taskId) {
+          forceFinalizeTaskRunById({
+            taskId: entry.taskId,
+            status: "cancelled",
+            endedAt: now,
+            lastEventAt: now,
+            error: reason,
+            terminalSummary: "Subagent run was terminated.",
+            terminalOutcome: null,
+          });
+        } else {
+          for (const taskRunId of taskRunIds) {
+            if (!taskRunId) {
+              continue;
+            }
+            finalizeTaskRunByRunId({
+              runId: taskRunId,
+              runtime: "subagent",
+              sessionKey: entry.childSessionKey,
+              status: "cancelled",
+              endedAt: now,
+              lastEventAt: now,
+              error: reason,
+              terminalSummary: "Subagent run was terminated.",
+            });
+          }
+        }
+      } catch (error) {
+        log.warn("Failed to cancel background task for terminated subagent run", {
+          runId: entry.runId,
+          error,
+        });
+      }
       if (!entriesByChildSessionKey.has(entry.childSessionKey)) {
         entriesByChildSessionKey.set(entry.childSessionKey, entry);
       }
@@ -618,6 +951,7 @@ export function createSubagentRunManager(params: {
     markSubagentRunForSteerRestart,
     markSubagentRunTerminated,
     registerSubagentRun,
+    repairInterruptedRecoveryRemaps,
     releaseSubagentRun,
     replaceSubagentRunAfterSteer,
     waitForSubagentCompletion,

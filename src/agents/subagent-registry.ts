@@ -31,6 +31,7 @@ import {
   SUBAGENT_ENDED_REASON_KILLED,
   type SubagentLifecycleEndedReason,
 } from "./subagent-lifecycle-events.js";
+import { isSubagentRecoveryStageDurablyBlocked } from "./subagent-recovery-admission.js";
 import {
   emitSubagentEndedHookOnce,
   resolveLifecycleOutcomeFromRunOutcome,
@@ -73,6 +74,7 @@ import {
 } from "./subagent-registry-state.js";
 import { configureSubagentRegistrySteerRuntime } from "./subagent-registry-steer-runtime.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { collectUnresolvedRecoveryRemapRunIds } from "./subagent-run-liveness.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
 
 export type { SubagentRunRecord } from "./subagent-registry.types.js";
@@ -101,7 +103,7 @@ type SubagentRegistryDeps = {
   isEmbeddedPiRunLoopActive: typeof isEmbeddedPiRunLoopActive;
   waitForEmbeddedPiRunLoopEnd: typeof waitForEmbeddedPiRunLoopEnd;
   onAgentEvent: typeof onAgentEvent;
-  persistSubagentRunsToDisk: typeof persistSubagentRunsToDisk;
+  persistSubagentRunsToDisk: (runs: Map<string, SubagentRunRecord>) => boolean | void;
   resolveAgentTimeoutMs: typeof resolveAgentTimeoutMs;
   restoreSubagentRunsFromDisk: typeof restoreSubagentRunsFromDisk;
   runSubagentAnnounceFlow: SubagentAnnounceModule["runSubagentAnnounceFlow"];
@@ -350,7 +352,7 @@ async function resolveSubagentRegistryContextEngine(
 }
 
 function persistSubagentRuns() {
-  subagentRegistryDeps.persistSubagentRunsToDisk(subagentRuns);
+  return subagentRegistryDeps.persistSubagentRunsToDisk(subagentRuns);
 }
 
 export function scheduleSubagentOrphanRecovery(params?: { delayMs?: number; maxRetries?: number }) {
@@ -446,6 +448,16 @@ function clearAllPendingLifecycleCompletes() {
   pendingLifecycleCompleteByRunId.clear();
 }
 
+function clearPendingLifecycleState(runId: string) {
+  clearPendingLifecycleError(runId);
+  clearPendingLifecycleTimeout(runId);
+  clearPendingLifecycleComplete(runId);
+}
+
+function isRunQuarantinedByRecoveryRemap(runId: string): boolean {
+  return collectUnresolvedRecoveryRemapRunIds(subagentRuns.values()).has(runId);
+}
+
 function schedulePendingLifecycleError(params: { runId: string; endedAt: number; error?: string }) {
   clearPendingLifecycleTimeout(params.runId);
   clearPendingLifecycleError(params.runId);
@@ -460,7 +472,14 @@ function schedulePendingLifecycleError(params: { runId: string; endedAt: number;
     if (!entry) {
       return;
     }
+    if (isRunQuarantinedByRecoveryRemap(params.runId)) {
+      return;
+    }
     if (entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE || entry.outcome?.status === "ok") {
+      return;
+    }
+    if (entry.recoveryState === "recovering") {
+      schedulePendingLifecycleError(params);
       return;
     }
     // Defer while the whole-run loop is still active (compaction / retry prep). Re-arm the
@@ -505,7 +524,14 @@ function schedulePendingLifecycleTimeout(params: { runId: string; endedAt: numbe
     if (!entry) {
       return;
     }
+    if (isRunQuarantinedByRecoveryRemap(params.runId)) {
+      return;
+    }
     if (entry.outcome?.status === "ok") {
+      return;
+    }
+    if (entry.recoveryState === "recovering") {
+      schedulePendingLifecycleTimeout(params);
       return;
     }
     // Defer while the whole-run loop is still active (compaction / retry prep). Re-arm the
@@ -548,6 +574,9 @@ function schedulePendingLifecycleComplete(params: { runId: string; endedAt: numb
     if (!entry) {
       return;
     }
+    if (isRunQuarantinedByRecoveryRemap(params.runId)) {
+      return;
+    }
     if (entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE || entry.outcome?.status === "ok") {
       return;
     }
@@ -584,6 +613,10 @@ async function completeTerminalRunWhenLoopSettled(params: {
   endedAt: number;
   accountId?: string;
 }): Promise<void> {
+  if (isRunQuarantinedByRecoveryRemap(params.runId)) {
+    clearPendingLifecycleState(params.runId);
+    return;
+  }
   if (subagentRegistryDeps.isEmbeddedPiRunLoopActive(params.childSessionKey)) {
     const settled = await subagentRegistryDeps.waitForEmbeddedPiRunLoopEnd(
       params.childSessionKey,
@@ -597,6 +630,9 @@ async function completeTerminalRunWhenLoopSettled(params: {
     }
   }
   clearPendingLifecycleComplete(params.runId);
+  if (isRunQuarantinedByRecoveryRemap(params.runId)) {
+    return;
+  }
   // Idempotent: several deferred/awaited paths can wake on the same loop-end.
   const current = subagentRuns.get(params.runId);
   if (
@@ -720,11 +756,19 @@ const subagentLifecycleController = createSubagentRegistryLifecycleController({
 const {
   clearScheduledResumeTimers,
   completeCleanupBookkeeping,
-  completeSubagentRun,
+  completeSubagentRun: completeSubagentRunUnquarantined,
   finalizeResumedAnnounceGiveUp,
   refreshFrozenResultFromSession,
   startSubagentAnnounceCleanupFlow,
 } = subagentLifecycleController;
+
+async function completeSubagentRun(params: Parameters<typeof completeSubagentRunUnquarantined>[0]) {
+  if (isRunQuarantinedByRecoveryRemap(params.runId)) {
+    clearPendingLifecycleState(params.runId);
+    return;
+  }
+  return await completeSubagentRunUnquarantined(params);
+}
 
 function resumeSubagentRun(runId: string) {
   if (!runId || resumedRuns.has(runId)) {
@@ -821,7 +865,7 @@ function resumeSubagentRun(runId: string) {
   resumedRuns.add(runId);
 }
 
-function restoreSubagentRunsOnce() {
+async function restoreSubagentRunsOnce() {
   if (restoreAttempted) {
     return;
   }
@@ -834,10 +878,13 @@ function restoreSubagentRunsOnce() {
     if (restoredCount === 0) {
       return;
     }
+    await subagentRunManager.repairInterruptedRecoveryRemaps();
+    const pendingRemapRunIds = collectUnresolvedRecoveryRemapRunIds(subagentRuns.values());
     if (
       reconcileOrphanedRestoredRuns({
         runs: subagentRuns,
         resumedRuns,
+        excludeRunIds: pendingRemapRunIds,
       })
     ) {
       persistSubagentRuns();
@@ -850,6 +897,12 @@ function restoreSubagentRunsOnce() {
     // Always start sweeper — session-mode runs (no archiveAtMs) also need TTL cleanup.
     startSweeper();
     for (const runId of subagentRuns.keys()) {
+      // Do not monitor either transport attempt while their persisted remap is
+      // incomplete. A later restart can retry the intent without running two
+      // completion owners against mismatched task/session state.
+      if (pendingRemapRunIds.has(runId)) {
+        continue;
+      }
       resumeSubagentRun(runId);
     }
 
@@ -898,8 +951,12 @@ async function sweepSubagentRuns() {
     const now = Date.now();
     const storeCache = new Map<string, Record<string, SessionEntry>>();
     const sessionRetentionMs = resolveArchiveAfterMs(subagentRegistryDeps.getRuntimeConfig());
+    const pendingRemapRunIds = collectUnresolvedRecoveryRemapRunIds(subagentRuns.values());
     let mutated = false;
     for (const [runId, entry] of subagentRuns.entries()) {
+      if (pendingRemapRunIds.has(runId)) {
+        continue;
+      }
       if (typeof entry.endedAt !== "number") {
         // The whole-run loop flag keeps a still-looping run from being swept as a
         // stale orphan during inter-attempt gaps (when the per-attempt run context
@@ -1067,6 +1124,10 @@ function ensureListener() {
         return;
       }
       const phase = evt.data?.phase;
+      if (isRunQuarantinedByRecoveryRemap(evt.runId)) {
+        clearPendingLifecycleState(evt.runId);
+        return;
+      }
       const entry = subagentRuns.get(evt.runId);
       if (!entry) {
         if (phase === "end" && typeof evt.sessionKey === "string") {
@@ -1080,12 +1141,21 @@ function ensureListener() {
         // A new attempt started → the prior attempt's deferred completion is not
         // terminal after all. Cancel it; this attempt's own end will decide.
         clearPendingLifecycleComplete(evt.runId);
+        let mutated = false;
+        if (entry.recoveryState !== undefined || entry.recoveryStartedAt !== undefined) {
+          entry.recoveryState = undefined;
+          entry.recoveryStartedAt = undefined;
+          mutated = true;
+        }
         const startedAt = typeof evt.data?.startedAt === "number" ? evt.data.startedAt : undefined;
         if (startedAt) {
           entry.startedAt = startedAt;
           if (typeof entry.sessionStartedAt !== "number") {
             entry.sessionStartedAt = startedAt;
           }
+          mutated = true;
+        }
+        if (mutated) {
           persistSubagentRuns();
         }
         return;
@@ -1168,7 +1238,8 @@ const subagentRunManager = createSubagentRunManager({
   startSweeper,
   stopSweeper,
   resumeSubagentRun,
-  clearPendingLifecycleError,
+  clearPendingLifecycleState,
+  countPendingDescendantRuns,
   resolveSubagentWaitTimeoutMs,
   scheduleOrphanRecovery: (args) => scheduleSubagentOrphanRecovery(args),
   notifyContextEngineSubagentEnded,
@@ -1183,6 +1254,16 @@ const subagentRunManager = createSubagentRunManager({
 configureSubagentRegistrySteerRuntime({
   replaceSubagentRunAfterSteer: (params) => subagentRunManager.replaceSubagentRunAfterSteer(params),
   finalizeInterruptedSubagentRun: async (params) => await finalizeInterruptedSubagentRun(params),
+  hasPendingSubagentRecoveryRemap: ({ previousRunId, nextRunId }) => {
+    const entry = subagentRuns.get(nextRunId);
+    const remap = entry?.recoveryRemap;
+    return Boolean(
+      entry &&
+      remap?.previousRunId === previousRunId &&
+      remap.nextRunId === nextRunId &&
+      isSubagentRecoveryStageDurablyBlocked(entry),
+    );
+  },
 });
 
 export function markSubagentRunForSteerRestart(runId: string) {
@@ -1267,10 +1348,10 @@ export async function finalizeInterruptedSubagentRun(params: {
   endedAt?: number;
 }): Promise<number> {
   const runIds = new Set<string>();
-  if (typeof params.runId === "string" && params.runId.trim()) {
-    runIds.add(params.runId.trim());
-  }
-  if (typeof params.childSessionKey === "string" && params.childSessionKey.trim()) {
+  const exactRunId = typeof params.runId === "string" ? params.runId.trim() : "";
+  if (exactRunId) {
+    runIds.add(exactRunId);
+  } else if (typeof params.childSessionKey === "string" && params.childSessionKey.trim()) {
     const childSessionKey = params.childSessionKey.trim();
     for (const [runId, entry] of subagentRuns.entries()) {
       if (entry.childSessionKey === childSessionKey) {
@@ -1429,7 +1510,7 @@ export function getLatestSubagentRunByChildSessionKey(
 }
 
 export function initSubagentRegistry() {
-  restoreSubagentRunsOnce();
+  void restoreSubagentRunsOnce();
 }
 
 // Let the shared outbound plan treat bare silent replies as dropped (instead

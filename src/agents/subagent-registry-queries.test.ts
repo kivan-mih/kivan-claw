@@ -82,7 +82,7 @@ describe("subagent registry query regressions", () => {
     expect(countActiveRunsForSessionFromRuns(runs, "agent:main:main")).toBe(1);
   });
 
-  it("does not count stale unended descendants as pending work", () => {
+  it("keeps stale unended descendants pending until cleanup completes", () => {
     const now = Date.now();
     const parentSessionKey = "agent:main:subagent:parent-stale-desc";
     const runs = toRunMap([
@@ -104,7 +104,7 @@ describe("subagent registry query regressions", () => {
       }),
     ]);
 
-    expect(countPendingDescendantRunsFromRuns(runs, parentSessionKey)).toBe(1);
+    expect(countPendingDescendantRunsFromRuns(runs, parentSessionKey)).toBe(2);
   });
 
   it("keeps a stale unended orchestrator active only when live descendants remain", () => {

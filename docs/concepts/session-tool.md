@@ -54,6 +54,14 @@ recent messages on each row. Derived titles and previews are produced only for
 sessions the caller can already see under the configured session tool
 visibility policy, so unrelated sessions stay hidden.
 
+Subagent-backed rows also expose orchestration-scoped fields:
+
+- `workflowState`: `running`, `recovering`, `reconciling`, `waiting_children`, `done`, `failed`, `killed`, `timeout`, or `interrupted`
+- `workflowTerminal`: whether the logical subagent workflow is terminal
+- `pendingDescendants`: the durable count of descendant runs that have not settled
+
+These fields are distinct from the legacy session `status`, which describes the projected session run. In particular, a coordinator whose turn ended through `sessions_yield` can have `workflowState: "waiting_children"` while descendants remain, then `workflowState: "reconciling"` until its continuation produces a terminal outcome; both are nonterminal. Treat the workflow fields (or the exact run in `subagents list`) as the liveness authority; a bounded history tail or a missing artifact is not terminal evidence.
+
 `sessions_history` fetches the conversation transcript for a specific session.
 By default, tool results are excluded -- pass `includeTools: true` to see them.
 The returned view is intentionally bounded and safety-filtered:
@@ -120,7 +128,8 @@ not session keys.
 `sessions_yield` intentionally ends the current turn so the next message can be
 the follow-up event you are waiting for. Use it after spawning sub-agents when
 you want completion results to arrive as the next message instead of building
-poll loops.
+poll loops. Yielding ends the turn, not the logical subagent workflow: pending
+descendants keep its workflow and background task nonterminal.
 
 `subagents` is the control-plane helper for already spawned OpenClaw
 sub-agents. It supports:
@@ -133,12 +142,13 @@ sub-agents. It supports:
 
 `sessions_spawn` creates an isolated session for a background task by default.
 It is always non-blocking -- it returns immediately with a `runId` and
-`childSessionKey`.
+`childSessionKey`, or an immediate admission error without starting a run.
 
 Key options:
 
 - `runtime: "subagent"` (default) or `"acp"` for external harness agents.
 - `model` and `thinking` overrides for the child session.
+- `stageKey` plus `onConflict: "reject"` to prevent two native sub-agents from executing the same logical stage concurrently for one requester. Conflicts return the incumbent task/run metadata without dispatching another run.
 - `thread: true` to bind the spawn to a chat thread (Discord, Slack, etc.).
 - `sandbox: "require"` to enforce sandboxing on the child.
 - `context: "fork"` for native sub-agents when the child needs the current

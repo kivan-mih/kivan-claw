@@ -14,6 +14,7 @@ import { optionalStringEnum } from "../schema/typebox.js";
 import type { SpawnedToolContext } from "../spawned-context.js";
 import { registerSubagentRun } from "../subagent-registry.js";
 import {
+  SUBAGENT_SPAWN_CONFLICT_POLICIES,
   SUBAGENT_SPAWN_CONTEXT_MODES,
   SUBAGENT_SPAWN_MODES,
   spawnSubagentDirect,
@@ -148,6 +149,17 @@ function createSessionsSpawnToolSchema(params: {
   const schema = {
     task: Type.String(),
     label: Type.Optional(Type.String()),
+    stageKey: Type.Optional(
+      Type.String({
+        maxLength: 256,
+        description:
+          "Native-subagent logical stage identity. Only one queued or running stage with this key is allowed per requester session.",
+      }),
+    ),
+    onConflict: optionalStringEnum(SUBAGENT_SPAWN_CONFLICT_POLICIES, {
+      description:
+        'Conflict policy for stageKey. "reject" returns the incumbent task without starting duplicate work.',
+    }),
     runtime: optionalStringEnum(
       params.acpAvailable ? SESSIONS_SPAWN_RUNTIMES : (["subagent"] as const),
     ),
@@ -269,6 +281,8 @@ export function createSessionsSpawnTool(
       }
       const task = readStringParam(params, "task", { required: true });
       const label = readStringParam(params, "label") ?? "";
+      const stageKey = readStringParam(params, "stageKey");
+      const onConflict = params.onConflict === "reject" ? "reject" : undefined;
       const runtime = params.runtime === "acp" ? "acp" : "subagent";
       const requestedAgentId = readStringParam(params, "agentId");
       const resumeSessionId = readStringParam(params, "resumeSessionId");
@@ -297,6 +311,9 @@ export function createSessionsSpawnTool(
       }
       if (runtime === "acp" && context === "fork") {
         throw new Error('context="fork" is only supported for runtime="subagent".');
+      }
+      if (runtime === "acp" && stageKey) {
+        throw new Error("stageKey is currently supported only for runtime='subagent'.");
       }
       // Back-compat: older callers used timeoutSeconds for this tool.
       const timeoutSecondsCandidate =
@@ -426,6 +443,8 @@ export function createSessionsSpawnTool(
         {
           task,
           label: label || undefined,
+          stageKey,
+          onConflict,
           agentId: requestedAgentId,
           model: modelOverride,
           thinking: thinkingOverrideRaw,

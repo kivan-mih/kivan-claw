@@ -133,6 +133,8 @@ describe("listSessionsFromStore subagent metadata", () => {
       cleanup: "keep",
       createdAt: now - 10_000,
       startedAt: now - 9_000,
+      endedAt: now - 3_000,
+      pauseReason: "sessions_yield",
       model: "openai/gpt-5.4",
     });
     registerAgentRunContext("run-parent", {
@@ -142,7 +144,7 @@ describe("listSessionsFromStore subagent metadata", () => {
       runId: "run-child",
       childSessionKey: "agent:main:subagent:child",
       controllerSessionKey: "agent:main:subagent:parent",
-      requesterSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:subagent:parent",
       requesterDisplayKey: "main",
       task: "child task",
       cleanup: "keep",
@@ -183,9 +185,12 @@ describe("listSessionsFromStore subagent metadata", () => {
 
     const parent = result.sessions.find((session) => session.key === "agent:main:subagent:parent");
     expect(parent?.status).toBe("running");
+    expect(parent?.workflowState).toBe("waiting_children");
+    expect(parent?.workflowTerminal).toBe(false);
+    expect(parent?.pendingDescendants).toBe(1);
     expect(parent?.startedAt).toBe(now - 9_000);
     expect(parent?.endedAt).toBeUndefined();
-    expect(parent?.runtimeMs).toBeGreaterThanOrEqual(9_000);
+    expect(parent?.runtimeMs).toBe(6_000);
     expect(parent?.childSessions).toEqual(["agent:main:subagent:child"]);
 
     const child = result.sessions.find((session) => session.key === "agent:main:subagent:child");
@@ -205,7 +210,7 @@ describe("listSessionsFromStore subagent metadata", () => {
     expect(failed?.runtimeMs).toBe(5_000);
   });
 
-  test("does not show stale registry-only subagent runs as actively running", () => {
+  test("uses durable unended subagent state without an in-memory run context", () => {
     const now = Date.now();
     const childSessionKey = "agent:main:subagent:stale-display";
     const store: Record<string, SessionEntry> = {
@@ -241,11 +246,14 @@ describe("listSessionsFromStore subagent metadata", () => {
     });
 
     const row = result.sessions.find((session) => session.key === childSessionKey);
-    expect(row?.status).toBe("done");
-    expect(row?.subagentRunState).toBe("historical");
-    expect(row?.hasActiveSubagentRun).toBe(false);
-    expect(row?.endedAt).toBe(now - 500);
-    expect(row?.runtimeMs).toBe(3_500);
+    expect(row?.status).toBe("running");
+    expect(row?.subagentRunState).toBe("active");
+    expect(row?.hasActiveSubagentRun).toBe(true);
+    expect(row?.workflowState).toBe("running");
+    expect(row?.workflowTerminal).toBe(false);
+    expect(row?.pendingDescendants).toBe(0);
+    expect(row?.endedAt).toBeUndefined();
+    expect(row?.runtimeMs).toBeGreaterThanOrEqual(4_000);
   });
 
   test("does not keep childSessions attached to a stale older controller row", () => {
@@ -706,7 +714,7 @@ describe("listSessionsFromStore subagent metadata", () => {
     });
   });
 
-  test("prefers persisted terminal session state when only stale active subagent snapshots remain", async () => {
+  test("prefers a durable active subagent snapshot over stale terminal session state", async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-session-utils-subagent-"));
     const stateDir = path.join(tempRoot, "state");
     fs.mkdirSync(stateDir, { recursive: true });
@@ -776,12 +784,14 @@ describe("listSessionsFromStore subagent metadata", () => {
         },
       );
 
-      expect(row?.status).toBe("done");
-      expect(row?.subagentRunState).toBe("historical");
-      expect(row?.hasActiveSubagentRun).toBe(false);
+      expect(row?.status).toBe("running");
+      expect(row?.subagentRunState).toBe("active");
+      expect(row?.hasActiveSubagentRun).toBe(true);
+      expect(row?.workflowState).toBe("running");
+      expect(row?.workflowTerminal).toBe(false);
       expect(row?.startedAt).toBe(now - 9_000);
-      expect(row?.endedAt).toBe(now - 1_800);
-      expect(row?.runtimeMs).toBe(100);
+      expect(row?.endedAt).toBeUndefined();
+      expect(row?.runtimeMs).toBeGreaterThanOrEqual(9_000);
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }

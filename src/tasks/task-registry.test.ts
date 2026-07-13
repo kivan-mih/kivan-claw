@@ -35,6 +35,7 @@ import {
   markTaskRunningByRunId,
   markTaskTerminalById,
   markTaskTerminalByRunId,
+  rebindActiveTaskRun,
   recordTaskProgressByRunId,
   reloadTaskRegistryFromStore,
   resetTaskRegistryControlRuntimeForTests,
@@ -59,6 +60,7 @@ import {
   sweepTaskRegistry,
 } from "./task-registry.maintenance.js";
 import { configureTaskRegistryRuntime } from "./task-registry.store.js";
+import { isTaskStageConflictError } from "./task-stage-admission.js";
 
 const ORIGINAL_STATE_DIR = process.env.OPENCLAW_STATE_DIR;
 const hoisted = vi.hoisted(() => {
@@ -363,6 +365,291 @@ describe("task-registry", () => {
         runtime: "acp",
         status: "succeeded",
         endedAt: 250,
+      });
+    });
+  });
+
+  it("leaves subagent task terminalization to the subagent registry", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const task = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:child",
+        runId: "run-logical-subagent",
+        task: "Wait for nested work",
+        status: "running",
+        deliveryStatus: "pending",
+        startedAt: 100,
+      });
+
+      emitAgentEvent({
+        runId: "run-logical-subagent",
+        sessionKey: "agent:main:subagent:child",
+        stream: "lifecycle",
+        data: { phase: "end", endedAt: 200, yielded: true },
+      });
+      emitAgentEvent({
+        runId: "run-logical-subagent",
+        sessionKey: "agent:main:subagent:child",
+        stream: "lifecycle",
+        data: { phase: "error", endedAt: 300, error: "WebSocket error" },
+      });
+
+      expect(getTaskById(task.taskId)).toMatchObject({
+        status: "running",
+        runId: "run-logical-subagent",
+      });
+      expect(getTaskById(task.taskId)?.endedAt).toBeUndefined();
+    });
+  });
+
+  it("rebinds an active logical task to a recovered transport run", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const task = createTaskRecord({
+        runtime: "subagent",
+        sourceId: "logical-run",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:child",
+        runId: "attempt-1",
+        task: "Recover transparently",
+        status: "running",
+        deliveryStatus: "pending",
+        startedAt: 100,
+      });
+
+      expect(
+        rebindActiveTaskRun({
+          taskId: task.taskId,
+          previousRunId: "attempt-1",
+          nextRunId: "attempt-2",
+          runtime: "subagent",
+          sessionKey: "agent:main:subagent:child",
+          lastEventAt: 200,
+          progressSummary: "Recovered; resumed execution.",
+        }),
+      ).toEqual([
+        expect.objectContaining({
+          taskId: task.taskId,
+          sourceId: "logical-run",
+          runId: "attempt-2",
+          status: "running",
+        }),
+      ]);
+      expect(findTaskByRunId("attempt-1")).toBeUndefined();
+      expect(findTaskByRunId("attempt-2")).toMatchObject({
+        taskId: task.taskId,
+        progressSummary: "Recovered; resumed execution.",
+      });
+    });
+  });
+
+  it("rejects a duplicate active stage and releases it after terminalization", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const incumbent = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:planner-1",
+        runId: "planner-run-1",
+        stageKey: "planner",
+        task: "Plan the work",
+        status: "running",
+      });
+
+      try {
+        createTaskRecord({
+          runtime: "subagent",
+          ownerKey: "agent:main:main",
+          scopeKind: "session",
+          childSessionKey: "agent:main:subagent:planner-2",
+          runId: "planner-run-2",
+          stageKey: "planner",
+          task: "Duplicate planning",
+          status: "queued",
+        });
+        throw new Error("Expected duplicate stage admission to fail.");
+      } catch (error) {
+        expect(isTaskStageConflictError(error)).toBe(true);
+        if (isTaskStageConflictError(error)) {
+          expect(error.incumbent).toMatchObject({
+            taskId: incumbent.taskId,
+            runId: "planner-run-1",
+            stageKey: "planner",
+            status: "running",
+          });
+        }
+      }
+
+      markTaskTerminalById({
+        taskId: incumbent.taskId,
+        status: "cancelled",
+        endedAt: Date.now(),
+      });
+      expect(
+        createTaskRecord({
+          runtime: "subagent",
+          ownerKey: "agent:main:main",
+          scopeKind: "session",
+          childSessionKey: "agent:main:subagent:planner-2",
+          runId: "planner-run-2",
+          stageKey: "planner",
+          task: "Replacement planning",
+          status: "queued",
+        }),
+      ).toMatchObject({ runId: "planner-run-2", stageKey: "planner", status: "queued" });
+    });
+  });
+
+  it("reclaims an expired queued stage lease", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const expired = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:expired",
+        runId: "expired-reservation",
+        stageKey: "research",
+        stageLeaseExpiresAt: Date.now() - 1,
+        task: "Expired reservation",
+        status: "queued",
+      });
+      const replacement = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:replacement",
+        runId: "replacement-reservation",
+        stageKey: "research",
+        stageLeaseExpiresAt: Date.now() + 60_000,
+        task: "Replacement reservation",
+        status: "queued",
+      });
+
+      expect(getTaskById(expired.taskId)).toMatchObject({ status: "lost" });
+      expect(getTaskById(expired.taskId)?.stageLeaseExpiresAt).toBeUndefined();
+      expect(replacement).toMatchObject({ status: "queued", stageKey: "research" });
+    });
+  });
+
+  it("idempotently reopens a terminal logical task during recovery", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const task = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:recover-terminal",
+        runId: "recover-attempt-1",
+        stageKey: "implementation",
+        task: "Recover a terminalized attempt",
+        status: "failed",
+        terminalSummary: "Transport ended.",
+      });
+      const params = {
+        taskId: task.taskId,
+        previousRunId: "recover-attempt-1",
+        nextRunId: "recover-attempt-2",
+        runtime: "subagent" as const,
+        sessionKey: "agent:main:subagent:recover-terminal",
+        recoverTerminal: true,
+      };
+
+      expect(rebindActiveTaskRun(params)[0]).toMatchObject({
+        taskId: task.taskId,
+        runId: "recover-attempt-2",
+        status: "running",
+        deliveryStatus: "pending",
+      });
+      expect(rebindActiveTaskRun(params)[0]).toMatchObject({
+        taskId: task.taskId,
+        runId: "recover-attempt-2",
+        status: "running",
+      });
+      expect(getTaskById(task.taskId)).not.toHaveProperty("endedAt");
+      expect(getTaskById(task.taskId)).not.toHaveProperty("cleanupAfter");
+      expect(getTaskById(task.taskId)).not.toHaveProperty("terminalSummary");
+    });
+  });
+
+  it("never reopens an operator-cancelled logical task during recovery", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const task = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:cancelled-recovery",
+        runId: "cancelled-attempt-1",
+        stageKey: "implementation",
+        task: "Do not recover an operator cancellation",
+        status: "cancelled",
+      });
+
+      expect(
+        rebindActiveTaskRun({
+          taskId: task.taskId,
+          previousRunId: "cancelled-attempt-1",
+          nextRunId: "cancelled-attempt-2",
+          runtime: "subagent",
+          sessionKey: "agent:main:subagent:cancelled-recovery",
+          recoverTerminal: true,
+        }),
+      ).toEqual([]);
+      expect(getTaskById(task.taskId)).toMatchObject({
+        runId: "cancelled-attempt-1",
+        status: "cancelled",
+      });
+    });
+  });
+
+  it("preserves silent delivery while reopening a recoverable task", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+
+      const task = createTaskRecord({
+        runtime: "subagent",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:main:subagent:silent-recovery",
+        runId: "silent-attempt-1",
+        stageKey: "research",
+        task: "Recover without a completion message",
+        status: "failed",
+        deliveryStatus: "not_applicable",
+      });
+
+      expect(
+        rebindActiveTaskRun({
+          taskId: task.taskId,
+          previousRunId: "silent-attempt-1",
+          nextRunId: "silent-attempt-2",
+          runtime: "subagent",
+          sessionKey: "agent:main:subagent:silent-recovery",
+          recoverTerminal: true,
+        })[0],
+      ).toMatchObject({
+        runId: "silent-attempt-2",
+        status: "running",
+        deliveryStatus: "not_applicable",
       });
     });
   });

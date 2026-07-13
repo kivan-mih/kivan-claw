@@ -84,6 +84,7 @@ vi.mock("./subagent-registry-cleanup.js", () => ({
 vi.mock("./subagent-registry-helpers.js", () => ({
   ANNOUNCE_COMPLETION_HARD_EXPIRY_MS: 30 * 60_000,
   ANNOUNCE_EXPIRY_MS: 5 * 60_000,
+  DEFER_DESCENDANTS_DELAY_MS: 5_000,
   MAX_ANNOUNCE_RETRY_COUNT: 3,
   MIN_ANNOUNCE_RETRY_DELAY_MS: 1_000,
   capFrozenResultText: (text: string) => text.trim(),
@@ -260,6 +261,85 @@ describe("subagent registry lifecycle hardening", () => {
     expect(runSubagentAnnounceFlow).toHaveBeenCalledWith(
       expect.objectContaining({
         childSessionKey: entry.childSessionKey,
+      }),
+    );
+  });
+
+  it("finalizes a deferred parent task after its descendants settle", async () => {
+    const entry = createRunEntry({
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+    });
+    let pendingDescendants = 1;
+    const controller = createLifecycleController({
+      entry,
+      countPendingDescendantRuns: () => pendingDescendants,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: false,
+    });
+    expect(taskExecutorMocks.completeTaskRunByRunId).not.toHaveBeenCalled();
+
+    pendingDescendants = 0;
+    await controller.finalizeResumedAnnounceGiveUp({
+      runId: entry.runId,
+      entry,
+      reason: "retry-limit",
+    });
+
+    expect(taskExecutorMocks.completeTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: entry.runId,
+        runtime: "subagent",
+        sessionKey: entry.childSessionKey,
+      }),
+    );
+  });
+
+  it("reconciles an expired parent task when the last descendant is cleaned up", () => {
+    const parent = createRunEntry({
+      runId: "run-parent-expired",
+      childSessionKey: "agent:main:subagent:parent-expired",
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      cleanupCompletedAt: 5_000,
+    });
+    const child = createRunEntry({
+      runId: "run-child-settled",
+      childSessionKey: `${parent.childSessionKey}:subagent:child-settled`,
+      requesterSessionKey: parent.childSessionKey,
+      cleanup: "delete",
+      endedAt: 6_000,
+      outcome: { status: "ok" },
+    });
+    const runs = new Map([
+      [parent.runId, parent],
+      [child.runId, child],
+    ]);
+    const controller = createLifecycleController({
+      entry: parent,
+      runs,
+      countPendingDescendantRuns: (sessionKey) =>
+        sessionKey === parent.childSessionKey && runs.has(child.runId) ? 1 : 0,
+    });
+
+    controller.completeCleanupBookkeeping({
+      runId: child.runId,
+      entry: child,
+      cleanup: "delete",
+      completedAt: 7_000,
+    });
+
+    expect(taskExecutorMocks.completeTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: parent.runId,
+        runtime: "subagent",
+        sessionKey: parent.childSessionKey,
       }),
     );
   });
@@ -735,16 +815,18 @@ describe("subagent registry lifecycle hardening", () => {
       }),
     ).resolves.toBeUndefined();
 
-    expect(taskExecutorMocks.setDetachedTaskDeliveryStatusByRunId).toHaveBeenCalledWith(
-      expect.objectContaining({
-        runId: entry.runId,
-        runtime: "subagent",
-        sessionKey: entry.childSessionKey,
-        deliveryStatus: "failed",
-        error:
-          "UNAVAILABLE: requester wake failed; direct-primary: UNAVAILABLE: requester wake failed",
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(taskExecutorMocks.setDetachedTaskDeliveryStatusByRunId).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runId: entry.runId,
+          runtime: "subagent",
+          sessionKey: entry.childSessionKey,
+          deliveryStatus: "failed",
+          error:
+            "UNAVAILABLE: requester wake failed; direct-primary: UNAVAILABLE: requester wake failed",
+        }),
+      );
+    });
     expect(entry.lastAnnounceDeliveryError).toBe(
       "UNAVAILABLE: requester wake failed; direct-primary: UNAVAILABLE: requester wake failed",
     );

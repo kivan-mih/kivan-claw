@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { updateSessionStore } from "../config/sessions/store.js";
-import { buildSubagentList } from "./subagent-list.js";
+import { buildLatestSubagentRunIndex, buildSubagentList } from "./subagent-list.js";
 import {
   addSubagentRunForTests,
   resetSubagentRegistryForTests,
@@ -115,6 +115,8 @@ describe("buildSubagentList", () => {
     });
 
     expect(list.active[0]?.status).toBe("active (waiting on 1 child)");
+    expect(list.active[0]?.workflowState).toBe("waiting_children");
+    expect(list.active[0]?.workflowTerminal).toBe(false);
     expect(list.active[0]?.childSessions).toEqual([
       "agent:main:subagent:orchestrator-ended:subagent:child",
     ]);
@@ -232,7 +234,95 @@ describe("buildSubagentList", () => {
     expect(list.text).toContain("active subagents:\n(none)");
   });
 
-  it("does not let a stale unended child keep an ended parent listed active", () => {
+  it("projects recoverable transport interruptions as recovering", () => {
+    const now = Date.now();
+    const recoveringRun = {
+      runId: "run-recovering-list",
+      childSessionKey: "agent:main:subagent:recovering-list",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "recover interrupted work",
+      cleanup: "keep",
+      createdAt: now - 120_000,
+      startedAt: now - 120_000,
+      recoveryState: "recovering",
+      recoveryStartedAt: now - 1_000,
+    } satisfies SubagentRunRecord;
+    addSubagentRunForTests(recoveringRun);
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+    } as OpenClawConfig;
+
+    const list = buildSubagentList({
+      cfg,
+      runs: [recoveringRun],
+      recentMinutes: 30,
+      taskMaxChars: 110,
+    });
+
+    expect(list.active[0]).toMatchObject({
+      status: "recovering",
+      workflowState: "recovering",
+      workflowTerminal: false,
+      pendingDescendants: 0,
+    });
+  });
+
+  it("keeps a yielded parent reconciling after its descendants settle", () => {
+    const now = Date.now();
+    const yieldedRun = {
+      runId: "run-yielded-reconciling",
+      childSessionKey: "agent:main:subagent:yielded-reconciling",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "reconcile completed descendants",
+      cleanup: "keep",
+      createdAt: now - 120_000,
+      startedAt: now - 120_000,
+      endedAt: now - 1_000,
+      pauseReason: "sessions_yield",
+    } satisfies SubagentRunRecord;
+    addSubagentRunForTests(yieldedRun);
+
+    const list = buildSubagentList({
+      cfg: { commands: { text: true } } as OpenClawConfig,
+      runs: [yieldedRun],
+      recentMinutes: 30,
+      taskMaxChars: 110,
+    });
+
+    expect(list.active[0]).toMatchObject({
+      status: "reconciling",
+      workflowState: "reconciling",
+      workflowTerminal: false,
+      pendingDescendants: 0,
+    });
+    expect(list.recent).toEqual([]);
+  });
+
+  it("retains an old yielded coordinator in its controller child links", () => {
+    const now = Date.now();
+    const childSessionKey = "agent:main:subagent:yielded-old";
+    const yieldedRun = {
+      runId: "run-yielded-old",
+      childSessionKey,
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "remain linked while reconciliation is pending",
+      cleanup: "keep",
+      createdAt: now - 3 * 60 * 60_000,
+      startedAt: now - 3 * 60 * 60_000,
+      endedAt: now - 2 * 60 * 60_000,
+      pauseReason: "sessions_yield",
+    } satisfies SubagentRunRecord;
+
+    const index = buildLatestSubagentRunIndex(new Map([[yieldedRun.runId, yieldedRun]]), { now });
+
+    expect(index.childSessionsByController.get("agent:main:main")).toEqual([childSessionKey]);
+  });
+
+  it("keeps an ended parent waiting while a stale child remains unended", () => {
     const now = Date.now();
     const parentRun = {
       runId: "run-parent-ended-stale-child",
@@ -269,7 +359,12 @@ describe("buildSubagentList", () => {
       taskMaxChars: 110,
     });
 
-    expect(list.active).toEqual([]);
-    expect(list.recent[0]?.status).toBe("done");
+    expect(list.active[0]).toMatchObject({
+      status: "active (waiting on 1 child)",
+      workflowState: "waiting_children",
+      workflowTerminal: false,
+      pendingDescendants: 1,
+    });
+    expect(list.recent).toEqual([]);
   });
 });

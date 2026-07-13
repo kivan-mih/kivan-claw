@@ -23,6 +23,12 @@ export type PendingFinalDeliveryPayload = {
 
 export type SubagentRunRecord = {
   runId: string;
+  /** Stable identity retained when recovery replaces the transport run id. */
+  logicalRunId?: string;
+  /** Durable background-task record representing this logical subagent job. */
+  taskId?: string;
+  /** Optional logical stage protected from concurrent duplicate execution. */
+  stageKey?: string;
   childSessionKey: string;
   controllerSessionKey?: string;
   requesterSessionKey: string;
@@ -62,6 +68,15 @@ export type SubagentRunRecord = {
   lastAnnounceRetryHintMs?: number;
   endedReason?: SubagentLifecycleEndedReason;
   pauseReason?: "sessions_yield";
+  recoveryState?: "recovering";
+  recoveryStartedAt?: number;
+  /** Durable remap intent used to repair interrupted recovery after restart. */
+  recoveryRemap?: {
+    previousRunId: string;
+    nextRunId: string;
+    phase: "prepared" | "task_rebound" | "session_reconciled";
+    preparedAt: number;
+  };
   wakeOnDescendantSettle?: boolean;
   frozenResultText?: string | null;
   frozenResultCapturedAt?: number;

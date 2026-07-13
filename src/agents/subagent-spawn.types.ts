@@ -6,3 +6,6 @@ export type SpawnSubagentSandboxMode = (typeof SUBAGENT_SPAWN_SANDBOX_MODES)[num
 
 export const SUBAGENT_SPAWN_CONTEXT_MODES = ["isolated", "fork"] as const;
 export type SpawnSubagentContextMode = (typeof SUBAGENT_SPAWN_CONTEXT_MODES)[number];
+
+export const SUBAGENT_SPAWN_CONFLICT_POLICIES = ["reject"] as const;
+export type SpawnSubagentConflictPolicy = (typeof SUBAGENT_SPAWN_CONFLICT_POLICIES)[number];

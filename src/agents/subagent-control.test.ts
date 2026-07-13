@@ -13,10 +13,12 @@ import {
   sendControlledSubagentMessage,
   steerControlledSubagentRun,
 } from "./subagent-control.js";
+import { getLatestSubagentRunByChildSessionKey as getLatestSubagentRunForControlTest } from "./subagent-registry-read.js";
 import {
   __testing as subagentRegistryTesting,
   addSubagentRunForTests,
   getSubagentRunByChildSessionKey,
+  listSubagentRunsForController,
   resetSubagentRegistryForTests,
 } from "./subagent-registry.js";
 
@@ -564,6 +566,34 @@ describe("killSubagentRunAdmin", () => {
     expect(getSubagentRunByChildSessionKey(childSessionKey)?.endedAt).toBeTypeOf("number");
   });
 
+  it("kills a yielded run that is reconciling without descendants", async () => {
+    const childSessionKey = "agent:main:subagent:yielded-admin-kill";
+    addSubagentRunForTests({
+      runId: "run-yielded-admin-kill",
+      childSessionKey,
+      controllerSessionKey: "agent:main:other-controller",
+      requesterSessionKey: "agent:main:other-requester",
+      requesterDisplayKey: "other-requester",
+      task: "reconcile yielded work",
+      cleanup: "keep",
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 1_000,
+      pauseReason: "sessions_yield",
+    });
+
+    const result = await killSubagentRunAdmin({
+      cfg: cfgWithSessionStore(),
+      sessionKey: childSessionKey,
+    });
+
+    expect(result).toMatchObject({ found: true, killed: true, runId: "run-yielded-admin-kill" });
+    expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
+      endedReason: "subagent-killed",
+      cleanupHandled: true,
+    });
+  });
+
   it("returns found=false when the session key is not tracked as a subagent run", async () => {
     const result = await killSubagentRunAdmin({
       cfg: cfgWithSessionStore(),
@@ -718,6 +748,51 @@ describe("killControlledSubagentRun", () => {
     expect(getSubagentRunByChildSessionKey(childSessionKey)?.runId).toBe("run-current");
   });
 
+  it("kills a yielded parent and cascades to its pending descendant", async () => {
+    const parentSessionKey = "agent:main:subagent:yielded-controlled-kill";
+    const childSessionKey = `${parentSessionKey}:subagent:child`;
+    const parent = {
+      runId: "run-yielded-controlled-kill",
+      childSessionKey: parentSessionKey,
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "yielded parent",
+      cleanup: "keep" as const,
+      createdAt: Date.now() - 5_000,
+      startedAt: Date.now() - 4_000,
+      endedAt: Date.now() - 3_000,
+      pauseReason: "sessions_yield" as const,
+    };
+    addSubagentRunForTests(parent);
+    addSubagentRunForTests({
+      runId: "run-yielded-controlled-child",
+      childSessionKey,
+      controllerSessionKey: parentSessionKey,
+      requesterSessionKey: parentSessionKey,
+      requesterDisplayKey: parentSessionKey,
+      task: "pending child",
+      cleanup: "keep",
+      createdAt: Date.now() - 2_000,
+      startedAt: Date.now() - 1_000,
+    });
+
+    const result = await killControlledSubagentRun({
+      cfg: cfgWithSessionStore(),
+      controller: {
+        controllerSessionKey: "agent:main:main",
+        callerSessionKey: "agent:main:main",
+        callerIsSubagent: false,
+        controlScope: "children",
+      },
+      entry: parent,
+    });
+
+    expect(result).toMatchObject({ status: "ok", cascadeKilled: 1 });
+    expect(getSubagentRunByChildSessionKey(parentSessionKey)?.endedReason).toBe("subagent-killed");
+    expect(getSubagentRunByChildSessionKey(childSessionKey)?.endedReason).toBe("subagent-killed");
+  });
+
   it("does not kill a stale child row while cascading descendants from an ended current parent", async () => {
     const parentSessionKey = "agent:main:subagent:kill-parent";
     const childSessionKey = `${parentSessionKey}:subagent:child`;
@@ -771,6 +846,7 @@ describe("killControlledSubagentRun", () => {
       createdAt: Date.now() - 1_000,
       startedAt: Date.now() - 900,
     });
+    expect(getLatestSubagentRunForControlTest(childSessionKey)?.runId).toBe("run-child-current");
 
     const result = await killControlledSubagentRun({
       cfg: cfgWithSessionStore(),
@@ -795,6 +871,16 @@ describe("killControlledSubagentRun", () => {
       },
     });
 
+    expect(
+      listSubagentRunsForController(parentSessionKey).find(
+        (entry) => entry.runId === "run-child-current",
+      )?.endedReason,
+    ).toBeUndefined();
+    expect(
+      listSubagentRunsForController(parentSessionKey).find(
+        (entry) => entry.runId === "run-child-stale",
+      )?.endedReason,
+    ).toBeUndefined();
     expect(result).toEqual({
       status: "ok",
       runId: "run-parent-current",
@@ -802,8 +888,13 @@ describe("killControlledSubagentRun", () => {
       label: "current parent task",
       cascadeKilled: 1,
       cascadeLabels: ["leaf task"],
-      text: "killed 1 descendant of current parent task.",
+      text: "killed current parent task (+ 1 descendant).",
     });
+    expect(
+      listSubagentRunsForController("agent:main:main").find(
+        (entry) => entry.runId === "run-parent-current",
+      )?.endedReason,
+    ).toBe("subagent-killed");
     expect(getSubagentRunByChildSessionKey(leafSessionKey)?.endedAt).toBeTypeOf("number");
   });
 
@@ -1158,9 +1249,14 @@ describe("killAllControlledSubagentRuns", () => {
 
     expect(result).toEqual({
       status: "ok",
-      killed: 1,
-      labels: ["active bulk child task"],
+      killed: 2,
+      labels: ["current bulk parent task", "active bulk child task"],
     });
+    expect(
+      listSubagentRunsForController("agent:main:main").find(
+        (entry) => entry.runId === "run-current-bulk-desc-parent",
+      )?.endedReason,
+    ).toBe("subagent-killed");
     expect(getSubagentRunByChildSessionKey(childSessionKey)?.endedAt).toBeTypeOf("number");
   });
 });
@@ -1186,9 +1282,15 @@ describe("steerControlledSubagentRun", () => {
 
     const replaceSpy = vi
       .spyOn(await import("./subagent-registry.js"), "replaceSubagentRunAfterSteer")
-      .mockReturnValue(false);
+      .mockResolvedValue(false);
 
+    const clearSessionQueues = vi.fn(() => ({
+      followupCleared: 0,
+      laneCleared: 1,
+      keys: ["agent:main:subagent:steer-worker"],
+    }));
     setSubagentControlDepsForTest({
+      clearSessionQueues,
       callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
         if (request.method === "agent.wait") {
           return {} as T;
@@ -1234,6 +1336,10 @@ describe("steerControlledSubagentRun", () => {
         runId: "run-steer-old",
         suppressAnnounceReason: undefined,
       });
+      expect(clearSessionQueues).toHaveBeenLastCalledWith([
+        "agent:main:subagent:steer-worker",
+        undefined,
+      ]);
     } finally {
       replaceSpy.mockRestore();
     }

@@ -302,6 +302,11 @@ export function createSessionsListTool(opts?: {
           estimatedCostUsd:
             typeof entry.estimatedCostUsd === "number" ? entry.estimatedCostUsd : undefined,
           status: readSessionRunStatus(entry.status),
+          subagentRunState: entry.subagentRunState,
+          hasActiveSubagentRun: entry.hasActiveSubagentRun,
+          workflowState: entry.workflowState,
+          workflowTerminal: entry.workflowTerminal,
+          pendingDescendants: entry.pendingDescendants,
           startedAt: typeof entry.startedAt === "number" ? entry.startedAt : undefined,
           endedAt: typeof entry.endedAt === "number" ? entry.endedAt : undefined,
           runtimeMs: typeof entry.runtimeMs === "number" ? entry.runtimeMs : undefined,

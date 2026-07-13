@@ -150,6 +150,12 @@ session to confirm the effective tool list.
 <ParamField path="label" type="string">
   Optional human-readable label.
 </ParamField>
+<ParamField path="stageKey" type="string">
+  Optional logical stage identity for native sub-agents. While a queued or running task with the same stage key exists for this requester session, another spawn is rejected before agent dispatch.
+</ParamField>
+<ParamField path="onConflict" type='"reject"' default="reject">
+  Conflict behavior when `stageKey` is present. A rejected spawn returns `code: "stage_conflict"` plus the incumbent task/run metadata so the caller can follow the existing work instead of duplicating it.
+</ParamField>
 <ParamField path="agentId" type="string">
   Spawn under another agent id when allowed by `subagents.allowAgents`.
 </ParamField>
@@ -506,16 +512,32 @@ Sub-agents use a dedicated in-process queue lane:
 
 ## Liveness and recovery
 
+The durable subagent registry owns logical workflow liveness. `subagents list`
+and `sessions_list` use the same workflow projection: a yielded parent with
+pending descendants is `waiting_children`, then `reconciling` until its continuation
+produces a terminal outcome; a recoverable transport interruption is `recovering`.
+None of these states is terminal. Structured list entries expose
+`workflowState`, `workflowTerminal`, and `pendingDescendants` so callers do not
+need to infer liveness from session timestamps or transcript tails.
+
+One logical subagent task can span more than one transport run. When recovery
+replaces a transport run ID, OpenClaw rebinds the active task record to the new
+run while preserving its task identity; raw `end` or `error` events do not
+terminalize that task ahead of the subagent registry's final outcome.
+
 OpenClaw does not treat `endedAt` absence as permanent proof that a
 sub-agent is still alive. Unended runs older than the stale-run window
-stop counting as active/pending in `/subagents list`, status summaries,
-descendant completion gating, and per-session concurrency checks.
+stop counting as actively executing in `/subagents list`, status summaries,
+and per-session concurrency checks. They remain pending for descendant
+completion gating until the sweeper explicitly records a terminal lost-context
+outcome and cleanup completes; a parent cannot succeed while an interrupted
+descendant is still nonterminal.
 
-After a gateway restart, stale unended restored runs are pruned unless
-their child session is marked `abortedLastRun: true`. Those
-restart-aborted child sessions remain recoverable through the sub-agent
-orphan recovery flow, which sends a synthetic resume message before
-clearing the aborted marker.
+After a gateway restart, unended restored runs with a valid child session stay
+tracked until recovery or the sweeper settles them. Child sessions marked
+`abortedLastRun: true` remain recoverable through the sub-agent orphan recovery
+flow, which sends a synthetic resume message before clearing the aborted
+marker. Missing child-session records are pruned as orphans.
 
 Automatic restart recovery is bounded per child session. If the same
 sub-agent child is accepted for orphan recovery repeatedly inside the
@@ -545,7 +567,7 @@ still need normal device approval for scope upgrades.
 
 - Sub-agent announce is **best-effort**. If the gateway restarts, pending "announce back" work is lost.
 - Sub-agents still share the same gateway process resources; treat `maxConcurrent` as a safety valve.
-- `sessions_spawn` is always non-blocking: it returns `{ status: "accepted", runId, childSessionKey }` immediately.
+- `sessions_spawn` is always non-blocking: it returns `{ status: "accepted", runId, childSessionKey }` immediately, or an immediate error such as `stage_conflict` without dispatching duplicate work.
 - Sub-agent context only injects `AGENTS.md` + `TOOLS.md` (no `SOUL.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, or `BOOTSTRAP.md`).
 - Maximum nesting depth is 5 (`maxSpawnDepth` range: 1–5). Depth 2 is recommended for most use cases.
 - `maxChildrenPerAgent` caps active children per session (default `5`, range `1–20`).

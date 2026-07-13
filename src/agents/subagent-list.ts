@@ -24,9 +24,10 @@ import {
 import { getSubagentRunsSnapshotForRead } from "./subagent-registry-state.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import {
-  hasSubagentRunEnded,
-  isLiveUnendedSubagentRun,
+  resolveSubagentWorkflowProjection,
   shouldKeepSubagentRunChildLink,
+  type SubagentWorkflowProjection,
+  type SubagentWorkflowState,
 } from "./subagent-run-liveness.js";
 
 type SubagentListItem = {
@@ -37,6 +38,8 @@ type SubagentListItem = {
   label: string;
   task: string;
   status: string;
+  workflowState: SubagentWorkflowState;
+  workflowTerminal: boolean;
   pendingDescendants: number;
   runtime: string;
   runtimeMs: number;
@@ -153,26 +156,16 @@ export function isActiveSubagentRun(
   entry: SubagentRunRecord,
   pendingDescendantCount: (sessionKey: string) => number,
 ) {
-  return isLiveUnendedSubagentRun(entry) || pendingDescendantCount(entry.childSessionKey) > 0;
+  return resolveSubagentWorkflowProjection(entry, pendingDescendantCount(entry.childSessionKey))
+    .active;
 }
 
-function resolveRunStatus(entry: SubagentRunRecord, options?: { pendingDescendants?: number }) {
-  const pendingDescendants = Math.max(0, options?.pendingDescendants ?? 0);
-  if (pendingDescendants > 0) {
-    const childLabel = pendingDescendants === 1 ? "child" : "children";
-    return `active (waiting on ${pendingDescendants} ${childLabel})`;
+function resolveRunStatus(workflow: SubagentWorkflowProjection) {
+  if (workflow.state === "waiting_children") {
+    const childLabel = workflow.pendingDescendants === 1 ? "child" : "children";
+    return `active (waiting on ${workflow.pendingDescendants} ${childLabel})`;
   }
-  if (!hasSubagentRunEnded(entry)) {
-    return "running";
-  }
-  const status = entry.outcome?.status ?? "done";
-  if (status === "ok") {
-    return "done";
-  }
-  if (status === "error") {
-    return "failed";
-  }
-  return status;
+  return workflow.state;
 }
 
 function resolveModelRef(entry?: SessionEntry, fallbackModel?: string) {
@@ -248,9 +241,8 @@ export function buildSubagentList(params: {
     const totalTokens = resolveTotalTokens(sessionEntry);
     const usageText = formatTokenUsageDisplay(sessionEntry);
     const pendingDescendants = pendingDescendantCount(entry.childSessionKey);
-    const status = resolveRunStatus(entry, {
-      pendingDescendants,
-    });
+    const workflow = resolveSubagentWorkflowProjection(entry, pendingDescendants, now);
+    const status = resolveRunStatus(workflow);
     const childSessions = childSessionsByController.get(entry.childSessionKey) ?? [];
     const runtime = formatDurationCompact(runtimeMs) ?? "n/a";
     const label = truncateLine(resolveSubagentLabel(entry), 48);
@@ -264,6 +256,8 @@ export function buildSubagentList(params: {
       label,
       task,
       status,
+      workflowState: workflow.state,
+      workflowTerminal: workflow.terminal,
       pendingDescendants,
       runtime,
       runtimeMs,

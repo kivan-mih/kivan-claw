@@ -14,6 +14,8 @@ export type DetachedTaskCreateParams = {
   runtime: TaskRuntime;
   taskKind?: string;
   sourceId?: string;
+  stageKey?: string;
+  stageLeaseExpiresAt?: number;
   requesterSessionKey?: string;
   ownerKey?: string;
   scopeKind?: TaskScopeKind;
@@ -53,6 +55,18 @@ export type DetachedTaskProgressParams = {
   lastEventAt?: number;
   progressSummary?: string | null;
   eventSummary?: string | null;
+};
+
+export type DetachedTaskRebindParams = {
+  taskId?: string;
+  previousRunId: string;
+  nextRunId: string;
+  runtime?: TaskRuntime;
+  sessionKey?: string;
+  lastEventAt?: number;
+  progressSummary?: string | null;
+  /** Explicitly reopen a terminal logical task when recovery resumes it. */
+  recoverTerminal?: boolean;
 };
 
 export type DetachedTaskCompleteParams = {
@@ -127,6 +141,8 @@ export type DetachedTaskLifecycleRuntime = {
   createRunningTaskRun: (params: DetachedRunningTaskCreateParams) => TaskRecord;
   startTaskRunByRunId: (params: DetachedTaskStartParams) => TaskRecord[];
   recordTaskRunProgressByRunId: (params: DetachedTaskProgressParams) => TaskRecord[];
+  /** Move an active logical task to a replacement transport run. */
+  rebindActiveTaskRun?: (params: DetachedTaskRebindParams) => TaskRecord[];
   finalizeTaskRunByRunId?: (params: DetachedTaskFinalizeParams) => TaskRecord[];
   completeTaskRunByRunId: (params: DetachedTaskCompleteParams) => TaskRecord[];
   failTaskRunByRunId: (params: DetachedTaskFailParams) => TaskRecord[];
